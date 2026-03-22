@@ -15,6 +15,7 @@ from clinic_copilot.prompts import (
     build_treatment_prompt,
     build_validation_prompt,
 )
+from clinic_copilot.regulatory_vault import regulatory_vault
 from clinic_copilot.schemas import (
     ClinicalEntities,
     ClinicalNoteRequest,
@@ -151,11 +152,16 @@ class LLMClient:
 
     def _call_json(self, prompt: str) -> Any:
         assert self._client is not None
+        masked_prompt = regulatory_vault.sanitize_for_llm(
+            text=prompt,
+            route="openai.responses.create",
+            metadata={"model": settings.openai_model},
+        )
         response = self._client.responses.create(
             model=settings.openai_model,
             input=[
                 {"role": "system", "content": build_system_prompt()},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": masked_prompt},
             ],
             text={"format": {"type": "json_object"}},
         )

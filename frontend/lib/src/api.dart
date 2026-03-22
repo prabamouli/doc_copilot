@@ -93,6 +93,28 @@ class ClinicApiClient {
     return AgentRunResponse.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
   }
 
+  Future<AgentRunResponse> runBillingOptimizer(String caseId) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/v1/agents/billing_optimizer_agent/run'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'case_id': caseId}),
+    );
+    _ensureSuccess(response);
+    return AgentRunResponse.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  Future<void> captureConversationSnapshot({
+    required String caseId,
+    required String transcript,
+  }) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/v1/cases/$caseId/conversation-capture'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'transcript': transcript}),
+    );
+    _ensureSuccess(response);
+  }
+
   Future<CaseRecord> submitReview({
     required String caseId,
     required String status,
@@ -157,6 +179,26 @@ class ClinicApiClient {
     );
     _ensureSuccess(response);
     return CaseRecord.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  Future<PatientHistoryDebugResponse> fetchPatientHistoryDebug({
+    required String patientId,
+    required String currentComplaint,
+    int topK = 5,
+  }) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/v1/patient-history/retrieve'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode(
+        {
+          'patient_id': patientId,
+          'current_complaint': currentComplaint,
+          'top_k': topK,
+        },
+      ),
+    );
+    _ensureSuccess(response);
+    return PatientHistoryDebugResponse.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
   }
 
   void _ensureSuccess(http.Response response) {

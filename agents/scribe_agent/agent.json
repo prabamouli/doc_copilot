@@ -1,0 +1,139 @@
+{
+  "agent": {
+    "id": "scribe_agent",
+    "name": "Scribe Agent",
+    "version": "1.0.0",
+    "description": "Compose a clinician-ready note from intake output and invoke safety tooling for high-risk medication mentions."
+  },
+  "graph": {
+    "id": "scribe_agent-graph",
+    "goal_id": "scribe-goal",
+    "version": "1.0.0",
+    "entry_node": "prepare_note",
+    "entry_points": {
+      "start": "prepare_note"
+    },
+    "pause_nodes": [],
+    "terminal_nodes": [
+      "finalize_note"
+    ],
+    "nodes": [
+      {
+        "id": "prepare_note",
+        "name": "Prepare Note",
+        "description": "Transform transcript and extracted entities into a concise clinical note skeleton.",
+        "node_type": "event_loop",
+        "input_keys": [
+          "transcript_text",
+          "entities_json"
+        ],
+        "output_keys": [
+          "draft_note_json"
+        ],
+        "nullable_output_keys": [],
+        "input_schema": {},
+        "output_schema": {},
+        "system_prompt": "You are a medical scribe assistant. Build a concise, transcript-grounded note draft in structured JSON.",
+        "tools": [],
+        "model": null,
+        "function": null,
+        "routes": {},
+        "max_retries": 3,
+        "retry_on": [],
+        "max_node_visits": 1,
+        "output_model": null,
+        "max_validation_retries": 2,
+        "client_facing": false
+      },
+      {
+        "id": "finalize_note",
+        "name": "Finalize Note",
+        "description": "Finalize note package and include any safety handoff requirement.",
+        "node_type": "event_loop",
+        "input_keys": [
+          "draft_note_json"
+        ],
+        "output_keys": [
+          "final_note_packet"
+        ],
+        "nullable_output_keys": [],
+        "input_schema": {},
+        "output_schema": {},
+        "system_prompt": "Present a clinician-ready structured note with explicit safety and validation disclaimers.",
+        "tools": [],
+        "model": null,
+        "function": null,
+        "routes": {},
+        "max_retries": 3,
+        "retry_on": [],
+        "max_node_visits": 1,
+        "output_model": null,
+        "max_validation_retries": 2,
+        "client_facing": true
+      }
+    ],
+    "edges": [
+      {
+        "id": "prepare-to-finalize",
+        "source": "prepare_note",
+        "target": "finalize_note",
+        "condition": "on_success",
+        "condition_expr": null,
+        "priority": 1,
+        "input_mapping": {}
+      }
+    ],
+    "max_steps": 30,
+    "max_retries_per_node": 3,
+    "description": "Scribe orchestration focused on safe, review-ready charting output.",
+    "created_at": "2026-03-22T00:00:00Z"
+  },
+  "goal": {
+    "id": "scribe-goal",
+    "name": "Clinician-Ready Scribing",
+    "description": "Generate concise, safe, and review-ready notes from upstream clinical extraction.",
+    "status": "draft",
+    "success_criteria": [
+      {
+        "id": "sc-structured-note",
+        "description": "Returns complete note sections in a consistent JSON structure.",
+        "metric": "schema_validity",
+        "target": "100%",
+        "weight": 0.5,
+        "met": false
+      },
+      {
+        "id": "sc-safety-escalation",
+        "description": "Triggers safety review when high-risk medication context appears.",
+        "metric": "tool_invocation_coverage",
+        "target": "high",
+        "weight": 0.5,
+        "met": false
+      }
+    ],
+    "constraints": [
+      {
+        "id": "c-grounded-output",
+        "description": "Do not add unsupported clinical facts.",
+        "constraint_type": "hard",
+        "category": "safety",
+        "check": ""
+      }
+    ],
+    "context": {},
+    "required_capabilities": [],
+    "input_schema": {},
+    "output_schema": {},
+    "version": "1.0.0",
+    "parent_version": null,
+    "evolution_reason": null,
+    "created_at": "2026-03-22T00:00:00Z",
+    "updated_at": "2026-03-22T00:00:00Z"
+  },
+  "required_tools": [],
+  "metadata": {
+    "created_at": "2026-03-22T00:00:00Z",
+    "node_count": 2,
+    "edge_count": 1
+  }
+}

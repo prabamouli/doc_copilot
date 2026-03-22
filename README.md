@@ -15,6 +15,7 @@ Open-source clinician review workspace built with Flutter and FastAPI. The produ
 - Supports clinician edits to structured entities like symptoms, allergies, meds, and vitals
 - Serves multiple seeded demo cases so the UI works out of the box
 - Exposes integrated agent actions in both the backend API and the Flutter dashboard
+- Includes a production-style Flutter review console with queue filters, workspace switching, readiness scoring, and actionable agent results
 
 ## Safety choices
 
@@ -44,6 +45,49 @@ cp .env.example .env
 uvicorn clinic_copilot.main:app --reload
 ```
 
+## Real local model deployment
+
+The backend can run against a fully local stack:
+
+```text
+Ollama -> LiteLLM -> FastAPI/Haystack
+```
+
+1. Install and start Ollama:
+
+```bash
+brew install ollama
+ollama serve
+ollama pull llama3.2:1b
+```
+
+2. Start the LiteLLM proxy:
+
+```bash
+cd /Users/prabhamini/Documents/clinic_copilot_mvp
+source .venv/bin/activate
+cp .env.example .env
+litellm --config litellm.config.yaml --host 127.0.0.1 --port 4000
+```
+
+3. Start the backend:
+
+```bash
+cd /Users/prabhamini/Documents/clinic_copilot_mvp
+source .venv/bin/activate
+uvicorn clinic_copilot.main:app --reload
+```
+
+4. Test the Haystack route:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/haystack-pipeline \
+  -H "Content-Type: application/json" \
+  -d '{
+    "transcript": "Doctor: What brings you in today? Patient: I have fever and body pain for 2 days. Doctor: Any allergies? Patient: No known allergies."
+  }'
+```
+
 ## Run the Flutter dashboard
 
 In a second terminal:
@@ -53,7 +97,13 @@ cd /Users/prabhamini/Documents/clinic_copilot_mvp/frontend
 flutter run -d macos --dart-define=API_BASE_URL=http://127.0.0.1:8000
 ```
 
-The dashboard loads a seeded case queue automatically, shows a case rail for switching between patients, and keeps the transcript, amendment workspace, review controls, and audit timeline in sync with the selected chart.
+The dashboard loads a seeded case queue automatically and provides:
+
+- searchable queue management
+- overview, note-studio, agents, and audit workspaces
+- editable SOAP and structured-entity review
+- readiness scoring and clinician sign-off controls
+- agent results that can open cases or route reviewers to the relevant section
 
 ## API
 

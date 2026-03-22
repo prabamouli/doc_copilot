@@ -1,0 +1,179 @@
+{
+  "agent": {
+    "id": "billing_optimizer_agent",
+    "name": "Billing Optimizer Agent",
+    "version": "1.0.0",
+    "description": "Detects potential revenue leakage by matching SOAP procedures to CPT and assessment conditions to ICD-10, then flagging missing summary capture."
+  },
+  "graph": {
+    "id": "billing_optimizer_agent-graph",
+    "goal_id": "billing-optimization-goal",
+    "version": "1.0.0",
+    "entry_node": "load_note",
+    "entry_points": {
+      "start": "load_note"
+    },
+    "pause_nodes": [],
+    "terminal_nodes": [
+      "deliver_leakage_findings"
+    ],
+    "nodes": [
+      {
+        "id": "load_note",
+        "name": "Load Note",
+        "description": "Collect generated summary and SOAP note content for billing optimization.",
+        "node_type": "event_loop",
+        "input_keys": [],
+        "output_keys": [
+          "note_payload"
+        ],
+        "nullable_output_keys": [],
+        "input_schema": {},
+        "output_schema": {},
+        "system_prompt": "Load generated summary and SOAP text from the selected case. If data is already available in context, proceed without prompting.",
+        "tools": [],
+        "model": null,
+        "function": null,
+        "routes": {},
+        "max_retries": 3,
+        "retry_on": [],
+        "max_node_visits": 1,
+        "output_model": null,
+        "max_validation_retries": 2,
+        "client_facing": false
+      },
+      {
+        "id": "detect_leakage",
+        "name": "Detect Leakage",
+        "description": "Cross-reference SOAP procedures with local CPT code database and find missing summary billing capture.",
+        "node_type": "event_loop",
+        "input_keys": [
+          "note_payload"
+        ],
+        "output_keys": [
+          "billing_findings"
+        ],
+        "nullable_output_keys": [],
+        "input_schema": {},
+        "output_schema": {},
+        "system_prompt": "Compare SOAP text to available CPT-linked procedures. If a procedure appears in SOAP but not in summary, mark as Potential Revenue Leakage and suggest the CPT code.",
+        "tools": [],
+        "model": null,
+        "function": null,
+        "routes": {},
+        "max_retries": 3,
+        "retry_on": [],
+        "max_node_visits": 1,
+        "output_model": null,
+        "max_validation_retries": 2,
+        "client_facing": false
+      },
+      {
+        "id": "deliver_leakage_findings",
+        "name": "Deliver Leakage Findings",
+        "description": "Return a compact billing optimization report for reviewer action.",
+        "node_type": "event_loop",
+        "input_keys": [
+          "billing_findings"
+        ],
+        "output_keys": [
+          "billing_summary"
+        ],
+        "nullable_output_keys": [],
+        "input_schema": {},
+        "output_schema": {},
+        "system_prompt": "Return billing findings clearly, prioritizing potential revenue leakage and recommended CPT codes.",
+        "tools": [],
+        "model": null,
+        "function": null,
+        "routes": {},
+        "max_retries": 3,
+        "retry_on": [],
+        "max_node_visits": 1,
+        "output_model": null,
+        "max_validation_retries": 2,
+        "client_facing": true
+      }
+    ],
+    "edges": [
+      {
+        "id": "load_note-to-detect_leakage",
+        "source": "load_note",
+        "target": "detect_leakage",
+        "condition": "on_success",
+        "condition_expr": null,
+        "priority": 1,
+        "input_mapping": {}
+      },
+      {
+        "id": "detect_leakage-to-deliver_leakage_findings",
+        "source": "detect_leakage",
+        "target": "deliver_leakage_findings",
+        "condition": "on_success",
+        "condition_expr": null,
+        "priority": 1,
+        "input_mapping": {}
+      }
+    ],
+    "max_steps": 50,
+    "max_retries_per_node": 3,
+    "description": "Finds billable procedures in SOAP text that may be missing from summary-level capture.",
+    "created_at": "2026-03-22T00:00:00Z"
+  },
+  "goal": {
+    "id": "billing-optimization-goal",
+    "name": "Billing Optimization",
+    "description": "Reduce missed reimbursement by flagging uncaptured billable procedures and suggesting CPT codes.",
+    "status": "draft",
+    "success_criteria": [
+      {
+        "id": "sc-procedure-detection",
+        "description": "Detects procedure mentions in SOAP sections against local CPT mapping.",
+        "metric": "procedure_match_recall",
+        "target": "high",
+        "weight": 0.45,
+        "met": false
+      },
+      {
+        "id": "sc-leakage-flags",
+        "description": "Flags likely revenue leakage when summary misses billable procedure context.",
+        "metric": "leakage_flag_precision",
+        "target": "high",
+        "weight": 0.35,
+        "met": false
+      },
+      {
+        "id": "sc-code-suggestions",
+        "description": "Provides actionable CPT suggestions for reviewer follow-up.",
+        "metric": "suggestion_actionability",
+        "target": "high",
+        "weight": 0.2,
+        "met": false
+      }
+    ],
+    "constraints": [
+      {
+        "id": "c-human-review",
+        "description": "Agent suggestions are assistive and require coder/clinician verification.",
+        "constraint_type": "hard",
+        "category": "compliance",
+        "check": ""
+      }
+    ],
+    "context": {},
+    "required_capabilities": [],
+    "input_schema": {},
+    "output_schema": {},
+    "version": "1.0.0",
+    "parent_version": null,
+    "evolution_reason": null,
+    "created_at": "2026-03-22T00:00:00Z",
+    "updated_at": "2026-03-22T00:00:00Z"
+  },
+  "required_tools": [],
+  "metadata": {
+    "created_at": "2026-03-22T00:00:00Z",
+    "node_count": 3,
+    "edge_count": 2
+  }
+}

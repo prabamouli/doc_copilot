@@ -1,0 +1,20 @@
+#!/bin/sh
+
+set -eu
+
+echo "codesign shim: $*" >> /tmp/clinic_copilot_codesign.log
+
+if [ "$#" -gt 0 ]; then
+  target="${!#}"
+  if [ -e "$target" ]; then
+    echo "cleaning $target" >> /tmp/clinic_copilot_codesign.log
+    xattr -cr "$target" 2>/dev/null || true
+    framework_dir="$(dirname "$target")"
+    if [ "$(basename "$framework_dir")" = "Flutter.framework" ] || [ "$(basename "$framework_dir")" = "App.framework" ]; then
+      echo "cleaning framework $framework_dir" >> /tmp/clinic_copilot_codesign.log
+      xattr -cr "$framework_dir" 2>/dev/null || true
+    fi
+  fi
+fi
+
+exec /usr/bin/codesign "$@"

@@ -21,6 +21,32 @@ class ClinicalNoteRequest(BaseModel):
     include_differential_diagnosis: bool = Field(default=False)
 
 
+class LongitudinalScribeRequest(BaseModel):
+    audio_path: str = Field(min_length=1, description="Absolute or workspace-relative path to the audio file.")
+    patient_id: str = Field(min_length=1, max_length=120, description="Patient identifier used for historical retrieval.")
+
+
+class PatientHistoryDebugRequest(BaseModel):
+    patient_id: str = Field(min_length=1, max_length=120)
+    current_complaint: str = Field(min_length=3, max_length=4000)
+    top_k: int = Field(default=5, ge=1, le=20)
+
+
+class RetrievedHistoryItem(BaseModel):
+    visit_id: str
+    date: str
+    score: float
+    source: str
+    text_chunk: str
+
+
+class PatientHistoryDebugResponse(BaseModel):
+    patient_id: str
+    current_complaint: str
+    historical_context: str
+    retrieved: list[RetrievedHistoryItem] = Field(default_factory=list)
+
+
 class EvidenceItem(BaseModel):
     quote: str = Field(description="Exact supporting text from the transcript.")
     speaker: Literal["doctor", "patient", "unknown"] = "unknown"
@@ -172,3 +198,31 @@ class AgentRunResponse(BaseModel):
     agent_id: str
     agent_name: str
     result: dict
+
+
+class AgentRuntimeLogEntry(BaseModel):
+    id: int
+    run_id: str
+    case_id: str
+    agent_id: str
+    agent_name: str
+    event_type: str
+    payload: dict
+    created_at: str
+
+
+class ConversationCaptureRequest(BaseModel):
+    transcript: str = Field(min_length=5, max_length=20000)
+
+
+class ConversationCaptureEntry(BaseModel):
+    id: int
+    case_id: str
+    speaker: Literal["doctor", "patient", "unknown"]
+    text: str
+    captured_at: str
+
+
+class ConversationCaptureResult(BaseModel):
+    case_id: str
+    captured_count: int

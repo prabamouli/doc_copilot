@@ -314,3 +314,54 @@ class QueueRankedCase {
     );
   }
 }
+
+class PatientHistoryDebugResponse {
+  const PatientHistoryDebugResponse({
+    required this.patientId,
+    required this.currentComplaint,
+    required this.historicalContext,
+    required this.retrieved,
+  });
+
+  final String patientId;
+  final String currentComplaint;
+  final String historicalContext;
+  final List<RetrievedHistoryItem> retrieved;
+
+  factory PatientHistoryDebugResponse.fromJson(Map<String, dynamic> json) {
+    return PatientHistoryDebugResponse(
+      patientId: json['patient_id'] as String? ?? '',
+      currentComplaint: json['current_complaint'] as String? ?? '',
+      historicalContext: json['historical_context'] as String? ?? '',
+      retrieved: (json['retrieved'] as List<dynamic>? ?? const [])
+          .map((item) => RetrievedHistoryItem.fromJson(item as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+}
+
+class RetrievedHistoryItem {
+  const RetrievedHistoryItem({
+    required this.visitId,
+    required this.date,
+    required this.score,
+    required this.source,
+    required this.textChunk,
+  });
+
+  final String visitId;
+  final String date;
+  final double score;
+  final String source;
+  final String textChunk;
+
+  factory RetrievedHistoryItem.fromJson(Map<String, dynamic> json) {
+    return RetrievedHistoryItem(
+      visitId: json['visit_id'] as String? ?? 'unknown-visit',
+      date: json['date'] as String? ?? 'unknown-date',
+      score: (json['score'] as num?)?.toDouble() ?? 0,
+      source: json['source'] as String? ?? 'unknown-source',
+      textChunk: json['text_chunk'] as String? ?? '',
+    );
+  }
+}

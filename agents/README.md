@@ -10,8 +10,14 @@ These agent definitions are project-relevant Hive exports for the current Clinic
 - `note_safety_reviewer`
   Reviews a generated note for missing information, unsupported claims, and clinician-review risks.
 
+- `scribe_agent`
+  Produces clinician-ready structured notes and escalates to safety tooling when high-risk medications are detected.
+
 - `review_queue_orchestrator`
   Helps a clinician or operations lead triage a queue of pending charts and decide what needs urgent attention first.
+
+- `billing_optimizer_agent`
+  Detects potential revenue leakage by finding billable procedures in SOAP sections that are missing from summary-level capture, then suggests CPT codes.
 
 ## Why these agents
 
@@ -24,8 +30,9 @@ These map cleanly to the product we have already built:
 ## Suggested usage order
 
 1. `clinical_intake_agent`
-2. `note_safety_reviewer`
-3. `review_queue_orchestrator`
+2. `scribe_agent`
+3. `note_safety_reviewer`
+4. `review_queue_orchestrator`
 
 ## RAG note
 
