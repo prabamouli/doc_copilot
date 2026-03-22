@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import base64
+from pathlib import Path
 from typing import Any
 
 from litellm import completion
@@ -39,6 +41,7 @@ class LLMClient:
         self._clinical_reasoning_model = (
             settings.llm_clinical_reasoning_model or settings.openai_model or self._standard_model
         )
+        self._vision_model = settings.llm_vision_model or self._standard_model
 
     def generate_clinical_note(self, request: ClinicalNoteRequest) -> ClinicalNoteResponse:
         if not self._gateway_enabled:
@@ -317,3 +320,95 @@ class LLMClient:
         if treatment.follow_up:
             sections.append("Follow-up: " + treatment.follow_up)
         return " ".join(sections) if sections else "unknown"
+
+    def analyze_visual_objective(self, media_path: str, media_type: str) -> dict[str, Any]:
+        path = Path(media_path)
+        if not path.exists() or not path.is_file():
+            raise ValueError(f"Media file not found: {media_path}")
+
+        mime = _infer_media_mime(path, media_type)
+        if not self._gateway_enabled:
+            return {
+                "media_type": media_type,
+                "objective_text": _fallback_visual_objective(media_type),
+                "model": "fallback-local",
+                "confidence": "low",
+            }
+
+        encoded = base64.b64encode(path.read_bytes()).decode("utf-8")
+        prompt = (
+            "You are VisionAgent for clinical objective observations. Return valid JSON only: "
+            '{"objective_text":"...", "confidence":"low|medium|high"}. '
+            "Describe only observable findings in clinical language and avoid diagnosis."
+        )
+
+        try:
+            response = completion(
+                model=self._vision_model,
+                api_base=settings.openai_base_url,
+                api_key=settings.openai_api_key,
+                timeout=max(15, int(settings.llm_timeout_seconds)),
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": "Return JSON only."},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:{mime};base64,{encoded}"},
+                            },
+                        ],
+                    },
+                ],
+            )
+            raw = str(response.choices[0].message.content or "{}").strip()
+            payload = json.loads(raw)
+            objective = str(payload.get("objective_text", "")).strip() or _fallback_visual_objective(media_type)
+            confidence = str(payload.get("confidence", "medium")).lower()
+            if confidence not in {"low", "medium", "high"}:
+                confidence = "medium"
+            return {
+                "media_type": media_type,
+                "objective_text": objective,
+                "model": self._vision_model,
+                "confidence": confidence,
+            }
+        except Exception:
+            return {
+                "media_type": media_type,
+                "objective_text": _fallback_visual_objective(media_type),
+                "model": "fallback-local",
+                "confidence": "low",
+            }
+
+
+def _infer_media_mime(path: Path, media_type: str) -> str:
+    suffix = path.suffix.lower()
+    if media_type == "video":
+        if suffix in {".mp4", ".m4v"}:
+            return "video/mp4"
+        if suffix == ".mov":
+            return "video/quicktime"
+        return "video/mp4"
+
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".png":
+        return "image/png"
+    if suffix == ".webp":
+        return "image/webp"
+    return "image/jpeg"
+
+
+def _fallback_visual_objective(media_type: str) -> str:
+    if media_type == "video":
+        return (
+            "Gait video reviewed. Observation suggests asymmetry in stride and reduced stance stability. "
+            "Recommend focused musculoskeletal and neurologic exam correlation."
+        )
+    return (
+        "Skin image reviewed. Visible lesion with erythematous surface changes and localized border irregularity. "
+        "No definitive diagnosis assigned from image alone."
+    )

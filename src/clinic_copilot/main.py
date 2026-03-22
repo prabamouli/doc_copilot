@@ -1,6 +1,7 @@
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from clinic_copilot.agent_runtime import ObserverAgent, ProjectAgentRegistry, ProjectAgentRunner
@@ -23,6 +24,7 @@ from clinic_copilot.schemas import (
     PatientHistoryDebugRequest,
     PatientHistoryDebugResponse,
     ReviewDecisionRequest,
+    VisionObjectiveResponse,
 )
 from clinic_copilot.service import ClinicalDocumentationService
 from clinic_copilot.storage import ClinicRepository
@@ -186,6 +188,35 @@ def list_conversation_capture(case_id: str, limit: int = Query(default=100, ge=1
         return service.list_conversation_captures(case_id=case_id, limit=limit)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Case not found") from exc
+
+
+@app.post("/v1/vision-agent/analyze", response_model=VisionObjectiveResponse)
+async def vision_agent_analyze(
+    media_file: UploadFile = File(...),
+    media_type: str = Form("image"),
+) -> VisionObjectiveResponse:
+    selected_type = media_type.strip().lower()
+    if selected_type not in {"image", "video"}:
+        content_type = str(media_file.content_type or "")
+        selected_type = "video" if content_type.startswith("video/") else "image"
+
+    suffix = Path(media_file.filename or "upload.bin").suffix or (".mp4" if selected_type == "video" else ".jpg")
+    with NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+        temp_path = Path(temp_file.name)
+        temp_file.write(await media_file.read())
+
+    try:
+        payload = service.analyze_visual_objective(media_path=str(temp_path), media_type=selected_type)
+        return VisionObjectiveResponse.model_validate(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"VisionAgent analysis failed: {exc}") from exc
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 @app.websocket("/ws/clinical-nudges")

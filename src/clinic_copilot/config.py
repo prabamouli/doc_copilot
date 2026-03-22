@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     openai_base_url: str | None = None
     llm_standard_model: str = "llama3.2:1b"
     llm_clinical_reasoning_model: str = "llama3.2:1b"
+    llm_vision_model: str = "moondream"
     llm_timeout_seconds: int = 90
     litellm_master_key: str = "sk-local"
     ollama_model: str = "llama3.2:1b"

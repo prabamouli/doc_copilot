@@ -32,6 +32,13 @@ class PatientHistoryDebugRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=20)
 
 
+class VisionObjectiveResponse(BaseModel):
+    media_type: Literal["image", "video"]
+    objective_text: str
+    model: str
+    confidence: ConfidenceLevel = "medium"
+
+
 class RetrievedHistoryItem(BaseModel):
     visit_id: str
     date: str

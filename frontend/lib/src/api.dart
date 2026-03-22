@@ -244,6 +244,23 @@ class ClinicApiClient {
     return PatientHistoryDebugResponse.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
   }
 
+  Future<VisionObjectiveResponse> analyzeVisionMedia({
+    required String mediaPath,
+    required String mediaType,
+  }) async {
+    final request = http.MultipartRequest(
+      'POST',
+      Uri.parse('$baseUrl/v1/vision-agent/analyze'),
+    )
+      ..fields['media_type'] = mediaType
+      ..files.add(await http.MultipartFile.fromPath('media_file', mediaPath));
+
+    final streamed = await _client.send(request);
+    final response = await http.Response.fromStream(streamed);
+    _ensureSuccess(response);
+    return VisionObjectiveResponse.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
   void _ensureSuccess(http.Response response) {
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception('Request failed (${response.statusCode}): ${response.body}');

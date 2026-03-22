@@ -390,3 +390,26 @@ class ClinicalNudgeEvent {
     );
   }
 }
+
+class VisionObjectiveResponse {
+  const VisionObjectiveResponse({
+    required this.mediaType,
+    required this.objectiveText,
+    required this.model,
+    required this.confidence,
+  });
+
+  final String mediaType;
+  final String objectiveText;
+  final String model;
+  final String confidence;
+
+  factory VisionObjectiveResponse.fromJson(Map<String, dynamic> json) {
+    return VisionObjectiveResponse(
+      mediaType: json['media_type'] as String? ?? 'image',
+      objectiveText: json['objective_text'] as String? ?? '',
+      model: json['model'] as String? ?? 'unknown',
+      confidence: json['confidence'] as String? ?? 'medium',
+    );
+  }
+}

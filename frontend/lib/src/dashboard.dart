@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 
 import 'api.dart';
 import 'models.dart';
@@ -65,10 +66,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
   List<AgentSummary> _agents = const [];
   AgentRunResponse? _latestAgentResponse;
   AgentRunResponse? _latestBillingResponse;
+  VisionObjectiveResponse? _latestVisionObjective;
   Timer? _conversationCaptureTimer;
   Timer? _clinicalNudgeTimer;
   ClinicalNudgeSocket? _clinicalNudgeSocket;
   StreamSubscription<ClinicalNudgeEvent>? _clinicalNudgeSubscription;
+  final ImagePicker _imagePicker = ImagePicker();
+  bool _ambientNudgesEnabled = true;
+  bool _analyzingVision = false;
   int _observerElapsedSeconds = 0;
   String? _lastNudgeId;
   WorkspaceView _workspaceView = WorkspaceView.overview;
@@ -119,6 +124,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void _startClinicalNudgeLoop() {
     _clinicalNudgeSubscription?.cancel();
     _clinicalNudgeTimer?.cancel();
+    unawaited(_clinicalNudgeSocket?.close());
+    _clinicalNudgeSocket = null;
+
+    if (!_ambientNudgesEnabled) {
+      return;
+    }
 
     _clinicalNudgeSocket = _api.connectClinicalNudges();
     _clinicalNudgeSubscription = _clinicalNudgeSocket!.events.listen(_handleClinicalNudgeEvent);
@@ -129,6 +140,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _sendClinicalNudgeObservation() {
+    if (!_ambientNudgesEnabled) return;
     final caseRecord = _caseRecord;
     if (caseRecord == null) return;
 
@@ -144,6 +156,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _handleClinicalNudgeEvent(ClinicalNudgeEvent event) {
+    if (!_ambientNudgesEnabled) return;
     if (!mounted || event.type != 'clinical_nudge') return;
     final caseRecord = _caseRecord;
     if (caseRecord == null) return;
@@ -414,6 +427,45 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (!mounted) return;
       setState(() {
         _runningBillingAgent = false;
+        _error = '$error';
+      });
+    }
+  }
+
+  Future<void> _runVisionAgent(String mediaType) async {
+    final caseRecord = _caseRecord;
+    if (caseRecord == null) return;
+
+    XFile? selected;
+    if (mediaType == 'video') {
+      selected = await _imagePicker.pickVideo(source: ImageSource.camera, maxDuration: const Duration(seconds: 20));
+    } else {
+      selected = await _imagePicker.pickImage(source: ImageSource.camera, imageQuality: 85);
+    }
+    if (selected == null) return;
+
+    setState(() {
+      _analyzingVision = true;
+      _error = null;
+    });
+    try {
+      final response = await _api.analyzeVisionMedia(mediaPath: selected.path, mediaType: mediaType);
+      if (!mounted) return;
+      setState(() {
+        _latestVisionObjective = response;
+        _analyzingVision = false;
+      });
+
+      final injected = response.objectiveText.trim();
+      final currentObjective = _objectiveController.text.trim();
+      if (injected.isNotEmpty && !currentObjective.contains(injected)) {
+        _objectiveController.text = currentObjective.isEmpty ? injected : '$currentObjective\n$injected';
+      }
+      _showMessage('Objective auto-injected from ${mediaType == 'video' ? 'gait video' : 'wound image'}.');
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _analyzingVision = false;
         _error = '$error';
       });
     }
@@ -705,6 +757,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             const SizedBox(height: 12),
                           ],
                           _WorkspaceBanner(view: _workspaceView),
+                          const SizedBox(height: 10),
+                          _AmbientNudgeToggle(
+                            enabled: _ambientNudgesEnabled,
+                            onChanged: (value) {
+                              setState(() {
+                                _ambientNudgesEnabled = value;
+                              });
+                              _startClinicalNudgeLoop();
+                            },
+                          ),
                         ],
                       ),
                     ),
@@ -874,6 +936,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 amendReasonController: _amendReasonController,
                 savingDraft: _savingDraft,
                 onSaveDraft: _saveDraftAmendments,
+              ),
+            ),
+            const SizedBox(height: 16),
+            _Panel(
+              title: 'Multi-modal Objective Assist',
+              subtitle: 'Capture wound photos or gait videos and auto-inject objective findings.',
+              accent: const Color(0xFF2F5D50),
+              child: _VisionAssistPanel(
+                running: _analyzingVision,
+                latest: _latestVisionObjective,
+                onCaptureImage: () => _runVisionAgent('image'),
+                onCaptureVideo: () => _runVisionAgent('video'),
               ),
             ),
             const SizedBox(height: 16),
@@ -1586,6 +1660,100 @@ class _WorkspaceBanner extends StatelessWidget {
       case WorkspaceView.audit:
         return Icons.timeline;
     }
+  }
+}
+
+class _AmbientNudgeToggle extends StatelessWidget {
+  const _AmbientNudgeToggle({required this.enabled, required this.onChanged});
+
+  final bool enabled;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.78),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.black.withValues(alpha: 0.06)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.notifications_active_outlined, size: 18),
+          const SizedBox(width: 10),
+          const Expanded(
+            child: Text(
+              'Ambient clinical nudges (session)',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+          ),
+          Switch.adaptive(value: enabled, onChanged: onChanged),
+        ],
+      ),
+    );
+  }
+}
+
+class _VisionAssistPanel extends StatelessWidget {
+  const _VisionAssistPanel({
+    required this.running,
+    required this.latest,
+    required this.onCaptureImage,
+    required this.onCaptureVideo,
+  });
+
+  final bool running;
+  final VisionObjectiveResponse? latest;
+  final VoidCallback onCaptureImage;
+  final VoidCallback onCaptureVideo;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            FilledButton.tonalIcon(
+              onPressed: running ? null : onCaptureImage,
+              icon: const Icon(Icons.camera_alt_outlined),
+              label: Text(running ? 'Analyzing...' : 'Capture wound photo'),
+            ),
+            FilledButton.tonalIcon(
+              onPressed: running ? null : onCaptureVideo,
+              icon: const Icon(Icons.videocam_outlined),
+              label: const Text('Capture gait video'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        if (latest != null)
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF4FAF3),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: const Color(0xFFCFE2CD)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Objective injected (${latest!.mediaType}) • ${latest!.model} • ${latest!.confidence}',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+                const SizedBox(height: 6),
+                Text(latest!.objectiveText, style: Theme.of(context).textTheme.bodyMedium),
+              ],
+            ),
+          ),
+      ],
+    );
   }
 }
 

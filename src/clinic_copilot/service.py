@@ -952,6 +952,11 @@ class ClinicalDocumentationService:
         self._repository.get_case(case_id)
         return self._repository.list_conversation_captures(case_id=case_id, limit=limit)
 
+    def analyze_visual_objective(self, media_path: str, media_type: str) -> dict[str, Any]:
+        if media_type not in {"image", "video"}:
+            raise ValueError("media_type must be either 'image' or 'video'")
+        return self._llm_client.analyze_visual_objective(media_path=media_path, media_type=media_type)
+
     def debug_retrieve_patient_history(self, patient_id: str, current_complaint: str, top_k: int = 5) -> dict[str, Any]:
         if not patient_id.strip():
             raise ValueError("patient_id is required")
