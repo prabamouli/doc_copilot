@@ -1,8 +1,41 @@
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
+import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'models.dart';
+
+class ClinicalNudgeSocket {
+  ClinicalNudgeSocket(this._channel);
+
+  final WebSocketChannel _channel;
+
+  Stream<ClinicalNudgeEvent> get events => _channel.stream
+      .map((raw) => raw is String ? raw : raw.toString())
+      .map((raw) => jsonDecode(raw) as Map<String, dynamic>)
+      .where((payload) => payload['type'] == 'clinical_nudge')
+      .map(ClinicalNudgeEvent.fromJson);
+
+  void observe({
+    required String caseId,
+    required String transcript,
+    required int elapsedSeconds,
+  }) {
+    _channel.sink.add(
+      jsonEncode(
+        {
+          'case_id': caseId,
+          'transcript': transcript,
+          'elapsed_seconds': elapsedSeconds,
+        },
+      ),
+    );
+  }
+
+  Future<void> close() async {
+    await _channel.sink.close();
+  }
+}
 
 class ClinicApiClient {
   ClinicApiClient({http.Client? client})
@@ -14,6 +47,16 @@ class ClinicApiClient {
 
   final http.Client _client;
   final String baseUrl;
+
+  ClinicalNudgeSocket connectClinicalNudges() {
+    final httpUri = Uri.parse(baseUrl);
+    final wsUri = httpUri.replace(
+      scheme: httpUri.scheme == 'https' ? 'wss' : 'ws',
+      path: '/ws/clinical-nudges',
+      query: null,
+    );
+    return ClinicalNudgeSocket(WebSocketChannel.connect(wsUri));
+  }
 
   Future<CaseRecord> fetchDemoCase() async {
     final response = await _client.get(Uri.parse('$baseUrl/v1/demo-case'));

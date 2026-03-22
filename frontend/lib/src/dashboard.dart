@@ -66,6 +66,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
   AgentRunResponse? _latestAgentResponse;
   AgentRunResponse? _latestBillingResponse;
   Timer? _conversationCaptureTimer;
+  Timer? _clinicalNudgeTimer;
+  ClinicalNudgeSocket? _clinicalNudgeSocket;
+  StreamSubscription<ClinicalNudgeEvent>? _clinicalNudgeSubscription;
+  int _observerElapsedSeconds = 0;
+  String? _lastNudgeId;
   WorkspaceView _workspaceView = WorkspaceView.overview;
 
   @override
@@ -74,11 +79,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _api = widget._apiClient ?? ClinicApiClient();
     _load();
     _startConversationCaptureLoop();
+    _startClinicalNudgeLoop();
   }
 
   @override
   void dispose() {
     _conversationCaptureTimer?.cancel();
+    _clinicalNudgeTimer?.cancel();
+    _clinicalNudgeSubscription?.cancel();
+    unawaited(_clinicalNudgeSocket?.close());
     _mainScrollController.dispose();
     _reviewerController.dispose();
     _feedbackController.dispose();
@@ -105,6 +114,57 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _conversationCaptureTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       _captureConversationTick();
     });
+  }
+
+  void _startClinicalNudgeLoop() {
+    _clinicalNudgeSubscription?.cancel();
+    _clinicalNudgeTimer?.cancel();
+
+    _clinicalNudgeSocket = _api.connectClinicalNudges();
+    _clinicalNudgeSubscription = _clinicalNudgeSocket!.events.listen(_handleClinicalNudgeEvent);
+
+    _clinicalNudgeTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      _sendClinicalNudgeObservation();
+    });
+  }
+
+  void _sendClinicalNudgeObservation() {
+    final caseRecord = _caseRecord;
+    if (caseRecord == null) return;
+
+    final transcript = caseRecord.transcript.trim();
+    if (transcript.isEmpty) return;
+
+    _observerElapsedSeconds += 30;
+    _clinicalNudgeSocket?.observe(
+      caseId: caseRecord.caseId,
+      transcript: transcript,
+      elapsedSeconds: _observerElapsedSeconds,
+    );
+  }
+
+  void _handleClinicalNudgeEvent(ClinicalNudgeEvent event) {
+    if (!mounted || event.type != 'clinical_nudge') return;
+    final caseRecord = _caseRecord;
+    if (caseRecord == null) return;
+    if (event.caseId != caseRecord.caseId) return;
+
+    final eventId = event.id;
+    if (eventId != null && eventId == _lastNudgeId) return;
+    _lastNudgeId = eventId;
+
+    final text = event.evidence.isNotEmpty
+        ? '${event.message}\nEvidence: ${event.evidence}'
+        : event.message;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('${event.title}: $text'),
+        backgroundColor: Colors.red.shade700,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 6),
+      ),
+    );
   }
 
   Future<void> _captureConversationTick() async {
@@ -209,6 +269,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _switchingCase = false;
         _workspaceView = WorkspaceView.overview;
       });
+      _observerElapsedSeconds = 0;
+      _lastNudgeId = null;
       _syncDraftControllers(selectedCase);
       unawaited(_loadHistoryCitations(selectedCase));
       _showMessage('Opened ${selectedCase.patientLabel}');

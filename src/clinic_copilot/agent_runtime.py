@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
+from litellm import completion
+
 from clinic_copilot.config import settings
 from clinic_copilot.schemas import (
     AgentRunRequest,
@@ -1008,6 +1010,99 @@ class BillingOptimizerAgent:
             "has_revenue_leakage": bool(potential_leakage or potential_icd10_leakage),
             "has_revenue_optimization_flags": bool(revenue_flags),
         }
+
+
+class ObserverAgent:
+    """Real-time observer agent that nudges clinicians about missed critical follow-up questions."""
+
+    def __init__(self) -> None:
+        self._model = settings.llm_standard_model or settings.openai_model or settings.ollama_model
+
+    def evaluate_transcript(self, transcript: str, elapsed_seconds: int) -> dict[str, Any] | None:
+        if elapsed_seconds < 120:
+            return None
+
+        lowered = transcript.lower()
+        if not self._mentions_chest_pain(lowered):
+            return None
+        if self._doctor_asked_follow_up(lowered):
+            return None
+
+        llm_confirmed = self._llm_confirm_nudge(transcript)
+        if llm_confirmed is False:
+            return None
+
+        evidence = self._find_evidence_sentence(transcript)
+        return {
+            "id": f"nudge-{abs(hash((evidence, elapsed_seconds))) % 10_000_000}",
+            "severity": "critical",
+            "title": "Clinical Nudge",
+            "message": "Patient reported chest pain. Ask about shortness of breath and left arm pain.",
+            "evidence": evidence,
+            "recommended_questions": [
+                "Are you short of breath right now?",
+                "Does the pain radiate to your left arm?",
+            ],
+            "trigger": "missed_chest_pain_follow_up",
+            "elapsed_seconds": elapsed_seconds,
+            "toast_color": "red",
+        }
+
+    def _mentions_chest_pain(self, lowered_transcript: str) -> bool:
+        patterns = ("chest pain", "chest tightness", "chest pressure")
+        return any(pattern in lowered_transcript for pattern in patterns)
+
+    def _doctor_asked_follow_up(self, lowered_transcript: str) -> bool:
+        doctor_lines = []
+        for line in lowered_transcript.splitlines():
+            cleaned = line.strip()
+            if cleaned.startswith("doctor:"):
+                doctor_lines.append(cleaned)
+        doctor_text = " ".join(doctor_lines) if doctor_lines else lowered_transcript
+
+        follow_up_terms = (
+            "shortness of breath",
+            "breathless",
+            "difficulty breathing",
+            "left arm pain",
+            "pain in your arm",
+            "radiate to your arm",
+        )
+        return any(term in doctor_text for term in follow_up_terms)
+
+    def _llm_confirm_nudge(self, transcript: str) -> bool | None:
+        # Fast local LLM confirmation layer; falls back to deterministic rule if unavailable.
+        try:
+            response = completion(
+                model=self._model,
+                api_base=settings.openai_base_url,
+                api_key=settings.openai_api_key,
+                timeout=12,
+                response_format={"type": "json_object"},
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an encounter observer. Return JSON only: "
+                            '{"nudge": true|false}. True only when patient mentions chest pain and '
+                            "doctor has not yet asked about shortness of breath or left arm pain."
+                        ),
+                    },
+                    {"role": "user", "content": transcript[-5000:]},
+                ],
+            )
+            raw = str(response.choices[0].message.content or "{}").strip()
+            parsed = json.loads(raw)
+            return bool(parsed.get("nudge", False))
+        except Exception:
+            return None
+
+    def _find_evidence_sentence(self, transcript: str) -> str:
+        for sentence in _split_text_into_sentences(transcript):
+            lowered = sentence.lower()
+            if "chest pain" in lowered or "chest tightness" in lowered or "chest pressure" in lowered:
+                return sentence
+        return "Patient reported chest pain symptoms."
 
 
 class AgentRuntime:

@@ -365,3 +365,28 @@ class RetrievedHistoryItem {
     );
   }
 }
+
+class ClinicalNudgeEvent {
+  const ClinicalNudgeEvent({
+    required this.type,
+    required this.caseId,
+    required this.payload,
+  });
+
+  final String type;
+  final String caseId;
+  final Map<String, dynamic> payload;
+
+  String? get id => payload['id'] as String?;
+  String get title => payload['title'] as String? ?? 'Clinical Nudge';
+  String get message => payload['message'] as String? ?? '';
+  String get evidence => payload['evidence'] as String? ?? '';
+
+  factory ClinicalNudgeEvent.fromJson(Map<String, dynamic> json) {
+    return ClinicalNudgeEvent(
+      type: json['type'] as String? ?? 'unknown',
+      caseId: json['case_id'] as String? ?? '',
+      payload: Map<String, dynamic>.from(json['payload'] as Map? ?? const {}),
+    );
+  }
+}

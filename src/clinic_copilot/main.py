@@ -1,9 +1,9 @@
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from clinic_copilot.agent_runtime import ProjectAgentRegistry, ProjectAgentRunner
+from clinic_copilot.agent_runtime import ObserverAgent, ProjectAgentRegistry, ProjectAgentRunner
 from clinic_copilot.llm import LLMClient
 from clinic_copilot.regulatory_vault import RegulatoryVaultMiddleware
 from clinic_copilot.schemas import (
@@ -41,6 +41,7 @@ repository = ClinicRepository()
 service = ClinicalDocumentationService(LLMClient(), repository)
 agent_registry = ProjectAgentRegistry(Path(__file__).resolve().parents[2] / "agents")
 agent_runner = ProjectAgentRunner(agent_registry, service)
+observer_agent = ObserverAgent()
 
 
 @app.on_event("startup")
@@ -185,3 +186,34 @@ def list_conversation_capture(case_id: str, limit: int = Query(default=100, ge=1
         return service.list_conversation_captures(case_id=case_id, limit=limit)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Case not found") from exc
+
+
+@app.websocket("/ws/clinical-nudges")
+async def websocket_clinical_nudges(websocket: WebSocket) -> None:
+    await websocket.accept()
+    last_nudge_id: str | None = None
+    try:
+        while True:
+            payload = await websocket.receive_json()
+            transcript = str(payload.get("transcript", "")).strip()
+            elapsed_seconds = int(payload.get("elapsed_seconds", 0))
+            case_id = str(payload.get("case_id", "unknown"))
+
+            if not transcript:
+                await websocket.send_json({"type": "ack", "status": "ignored", "reason": "empty_transcript"})
+                continue
+
+            nudge = observer_agent.evaluate_transcript(transcript=transcript, elapsed_seconds=elapsed_seconds)
+            if nudge is None:
+                await websocket.send_json({"type": "ack", "status": "ok", "case_id": case_id})
+                continue
+
+            nudge_id = str(nudge.get("id", ""))
+            if nudge_id and nudge_id == last_nudge_id:
+                await websocket.send_json({"type": "ack", "status": "duplicate_suppressed", "case_id": case_id})
+                continue
+
+            last_nudge_id = nudge_id or last_nudge_id
+            await websocket.send_json({"type": "clinical_nudge", "case_id": case_id, "payload": nudge})
+    except WebSocketDisconnect:
+        return
