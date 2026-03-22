@@ -1,0 +1,179 @@
+{
+  "agent": {
+    "id": "review_queue_orchestrator",
+    "name": "Review Queue Orchestrator",
+    "version": "1.0.0",
+    "description": "Triage a queue of clinician-review cases, surface the highest-priority charts, and summarize the next-best actions."
+  },
+  "graph": {
+    "id": "review_queue_orchestrator-graph",
+    "goal_id": "review-queue-goal",
+    "version": "1.0.0",
+    "entry_node": "load_queue",
+    "entry_points": {
+      "start": "load_queue"
+    },
+    "pause_nodes": [],
+    "terminal_nodes": [
+      "deliver_queue_plan"
+    ],
+    "nodes": [
+      {
+        "id": "load_queue",
+        "name": "Load Queue",
+        "description": "Collect case list, statuses, flags, and timestamps from the review dashboard or user.",
+        "node_type": "event_loop",
+        "input_keys": [],
+        "output_keys": [
+          "queue_payload"
+        ],
+        "nullable_output_keys": [],
+        "input_schema": {},
+        "output_schema": {},
+        "system_prompt": "You are loading a clinician review queue.\n\nIf the queue payload is already present, proceed directly.\nOtherwise, ask for the list of open cases with status, specialty, timestamps, and any review flags.\nCall set_output(\"queue_payload\", \"<payload>\") once enough data is available.",
+        "tools": [],
+        "model": null,
+        "function": null,
+        "routes": {},
+        "max_retries": 3,
+        "retry_on": [],
+        "max_node_visits": 1,
+        "output_model": null,
+        "max_validation_retries": 2,
+        "client_facing": true
+      },
+      {
+        "id": "triage_queue",
+        "name": "Triage Queue",
+        "description": "Rank cases by urgency, missing-critical-data risk, and likely clinician effort.",
+        "node_type": "event_loop",
+        "input_keys": [
+          "queue_payload"
+        ],
+        "output_keys": [
+          "triage_plan"
+        ],
+        "nullable_output_keys": [],
+        "input_schema": {},
+        "output_schema": {},
+        "system_prompt": "You are a clinical operations triage assistant.\n\nGiven queue_payload, rank cases using factors such as:\n- critical or warning review flags\n- time waiting in queue\n- missing vitals or allergy documentation\n- specialty urgency signals\n- whether the case is close to sign-off\n\nOutput a triage plan with:\n- cases ranked highest to lowest priority\n- one-line reason for each priority decision\n- immediate next action recommendation\n\nCall set_output(\"triage_plan\", \"<json>\").",
+        "tools": [],
+        "model": null,
+        "function": null,
+        "routes": {},
+        "max_retries": 3,
+        "retry_on": [],
+        "max_node_visits": 1,
+        "output_model": null,
+        "max_validation_retries": 2,
+        "client_facing": false
+      },
+      {
+        "id": "deliver_queue_plan",
+        "name": "Deliver Queue Plan",
+        "description": "Present the ranked queue and the next recommended actions to the clinician or operations user.",
+        "node_type": "event_loop",
+        "input_keys": [
+          "triage_plan"
+        ],
+        "output_keys": [
+          "queue_summary"
+        ],
+        "nullable_output_keys": [],
+        "input_schema": {},
+        "output_schema": {},
+        "system_prompt": "Present the triage plan in a concise operator-friendly format.\n\nLead with the top-priority cases and the reasons they should be handled first.\nThen give a short sequence of recommended next actions.\nCall set_output(\"queue_summary\", \"<summary>\").",
+        "tools": [],
+        "model": null,
+        "function": null,
+        "routes": {},
+        "max_retries": 3,
+        "retry_on": [],
+        "max_node_visits": 1,
+        "output_model": null,
+        "max_validation_retries": 2,
+        "client_facing": true
+      }
+    ],
+    "edges": [
+      {
+        "id": "load_queue-to-triage_queue",
+        "source": "load_queue",
+        "target": "triage_queue",
+        "condition": "on_success",
+        "condition_expr": null,
+        "priority": 1,
+        "input_mapping": {}
+      },
+      {
+        "id": "triage_queue-to-deliver_queue_plan",
+        "source": "triage_queue",
+        "target": "deliver_queue_plan",
+        "condition": "on_success",
+        "condition_expr": null,
+        "priority": 1,
+        "input_mapping": {}
+      }
+    ],
+    "max_steps": 50,
+    "max_retries_per_node": 3,
+    "description": "Ranks open charts and surfaces the next-best actions for clinician review operations.",
+    "created_at": "2026-03-22T00:00:00Z"
+  },
+  "goal": {
+    "id": "review-queue-goal",
+    "name": "Clinician Review Queue Triage",
+    "description": "Help a clinician or operations lead decide which charts to review first and why.",
+    "status": "draft",
+    "success_criteria": [
+      {
+        "id": "sc-rank-urgency",
+        "description": "Ranks charts in a way that reflects real review urgency.",
+        "metric": "triage_alignment",
+        "target": "high",
+        "weight": 0.45,
+        "met": false
+      },
+      {
+        "id": "sc-actionable",
+        "description": "Provides clear next actions for the operator.",
+        "metric": "actionability",
+        "target": "high",
+        "weight": 0.3,
+        "met": false
+      },
+      {
+        "id": "sc-fast-scan",
+        "description": "Can be reviewed quickly in a busy ops workflow.",
+        "metric": "time_to_understand",
+        "target": "<1 minute",
+        "weight": 0.25,
+        "met": false
+      }
+    ],
+    "constraints": [
+      {
+        "id": "c-no-clinical-overreach",
+        "description": "This agent prioritizes workflow only and does not make treatment decisions.",
+        "constraint_type": "hard",
+        "category": "safety",
+        "check": ""
+      }
+    ],
+    "context": {},
+    "required_capabilities": [],
+    "input_schema": {},
+    "output_schema": {},
+    "version": "1.0.0",
+    "parent_version": null,
+    "evolution_reason": null,
+    "created_at": "2026-03-22T00:00:00Z",
+    "updated_at": "2026-03-22T00:00:00Z"
+  },
+  "required_tools": [],
+  "metadata": {
+    "created_at": "2026-03-22T00:00:00Z",
+    "node_count": 3,
+    "edge_count": 2
+  }
+}

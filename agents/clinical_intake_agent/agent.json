@@ -1,0 +1,234 @@
+{
+  "agent": {
+    "id": "clinical_intake_agent",
+    "name": "Clinical Intake Agent",
+    "version": "1.0.0",
+    "description": "Collect a clinical transcript or visit summary, generate structured entities and a SOAP note, and hand off a clinician-ready draft for review."
+  },
+  "graph": {
+    "id": "clinical_intake_agent-graph",
+    "goal_id": "clinical-intake-goal",
+    "version": "1.0.0",
+    "entry_node": "intake",
+    "entry_points": {
+      "start": "intake"
+    },
+    "pause_nodes": [],
+    "terminal_nodes": [
+      "package_note"
+    ],
+    "nodes": [
+      {
+        "id": "intake",
+        "name": "Intake",
+        "description": "Collect transcript text and visit context from the user or upstream system.",
+        "node_type": "event_loop",
+        "input_keys": [],
+        "output_keys": [
+          "transcript_text",
+          "visit_context"
+        ],
+        "nullable_output_keys": [],
+        "input_schema": {},
+        "output_schema": {},
+        "system_prompt": "You are the intake assistant for a clinical documentation workflow.\n\nIf the user has already provided a transcript or visit summary, acknowledge it and proceed.\nOtherwise, ask them to paste the doctor-patient conversation or a concise visit summary.\n\nCollect the following in a lightweight way:\n- transcript_text\n- visit_context with locale, specialty, and clinician name if available\n\nAfter the user provides the information, call set_output for both transcript_text and visit_context.\nKeep the interaction concise and documentation-focused.",
+        "tools": [],
+        "model": null,
+        "function": null,
+        "routes": {},
+        "max_retries": 3,
+        "retry_on": [],
+        "max_node_visits": 1,
+        "output_model": null,
+        "max_validation_retries": 2,
+        "client_facing": true
+      },
+      {
+        "id": "extract_entities",
+        "name": "Extract Entities",
+        "description": "Extract symptoms, duration, meds, allergies, vitals, and history into structured clinical entities.",
+        "node_type": "event_loop",
+        "input_keys": [
+          "transcript_text",
+          "visit_context"
+        ],
+        "output_keys": [
+          "entities_json"
+        ],
+        "nullable_output_keys": [],
+        "input_schema": {},
+        "output_schema": {},
+        "system_prompt": "You are a clinical entity extraction specialist.\n\nFrom transcript_text, extract only transcript-supported facts.\nReturn structured entities covering:\n- symptoms\n- duration\n- severity\n- medical_history\n- medications\n- allergies\n- vitals\n\nUse set_output(\"entities_json\", \"<json>\") with a valid JSON object.\nIf a field is missing, use an empty array. Do not invent facts.",
+        "tools": [],
+        "model": null,
+        "function": null,
+        "routes": {},
+        "max_retries": 3,
+        "retry_on": [],
+        "max_node_visits": 1,
+        "output_model": null,
+        "max_validation_retries": 2,
+        "client_facing": false
+      },
+      {
+        "id": "draft_soap",
+        "name": "Draft SOAP",
+        "description": "Create a cautious SOAP note and concise clinical summary from the transcript and extracted entities.",
+        "node_type": "event_loop",
+        "input_keys": [
+          "transcript_text",
+          "entities_json",
+          "visit_context"
+        ],
+        "output_keys": [
+          "draft_note_json"
+        ],
+        "nullable_output_keys": [],
+        "input_schema": {},
+        "output_schema": {},
+        "system_prompt": "You are a clinical note drafting assistant.\n\nUsing transcript_text and entities_json, produce:\n- a concise summary\n- a SOAP note with subjective, objective, assessment, and plan\n- explicit uncertainty when facts are missing\n\nThe draft must support clinician review and must not claim certainty beyond the transcript.\nUse set_output(\"draft_note_json\", \"<json>\") with a valid JSON object.",
+        "tools": [],
+        "model": null,
+        "function": null,
+        "routes": {},
+        "max_retries": 3,
+        "retry_on": [],
+        "max_node_visits": 1,
+        "output_model": null,
+        "max_validation_retries": 2,
+        "client_facing": false
+      },
+      {
+        "id": "package_note",
+        "name": "Package Note",
+        "description": "Present the generated draft in a clinician-friendly handoff format.",
+        "node_type": "event_loop",
+        "input_keys": [
+          "draft_note_json",
+          "entities_json"
+        ],
+        "output_keys": [
+          "handoff_packet"
+        ],
+        "nullable_output_keys": [],
+        "input_schema": {},
+        "output_schema": {},
+        "system_prompt": "You are preparing a clinician-ready handoff packet.\n\nSummarize what was generated, note that clinician validation is required, and provide a clean presentation of the draft SOAP note and entities.\nCall set_output(\"handoff_packet\", \"<json or markdown string>\").\nYour final response should be concise and safe for clinical review.",
+        "tools": [],
+        "model": null,
+        "function": null,
+        "routes": {},
+        "max_retries": 3,
+        "retry_on": [],
+        "max_node_visits": 1,
+        "output_model": null,
+        "max_validation_retries": 2,
+        "client_facing": true
+      }
+    ],
+    "edges": [
+      {
+        "id": "intake-to-extract_entities",
+        "source": "intake",
+        "target": "extract_entities",
+        "condition": "on_success",
+        "condition_expr": null,
+        "priority": 1,
+        "input_mapping": {}
+      },
+      {
+        "id": "extract_entities-to-draft_soap",
+        "source": "extract_entities",
+        "target": "draft_soap",
+        "condition": "on_success",
+        "condition_expr": null,
+        "priority": 1,
+        "input_mapping": {}
+      },
+      {
+        "id": "draft_soap-to-package_note",
+        "source": "draft_soap",
+        "target": "package_note",
+        "condition": "on_success",
+        "condition_expr": null,
+        "priority": 1,
+        "input_mapping": {}
+      }
+    ],
+    "max_steps": 100,
+    "max_retries_per_node": 3,
+    "description": "Builds a cautious clinician-ready documentation draft from transcript input.",
+    "created_at": "2026-03-22T00:00:00Z"
+  },
+  "goal": {
+    "id": "clinical-intake-goal",
+    "name": "Clinical Intake Documentation",
+    "description": "Turn doctor-patient input into a structured, review-ready clinical documentation draft.",
+    "status": "draft",
+    "success_criteria": [
+      {
+        "id": "sc-supported-facts",
+        "description": "Only transcript-supported facts are included in structured output.",
+        "metric": "unsupported_fact_rate",
+        "target": "0",
+        "weight": 0.35,
+        "met": false
+      },
+      {
+        "id": "sc-usable-soap",
+        "description": "Produces a SOAP note a clinician can review quickly.",
+        "metric": "review_readiness",
+        "target": "high",
+        "weight": 0.3,
+        "met": false
+      },
+      {
+        "id": "sc-structured-entities",
+        "description": "Captures core charting entities in structured form.",
+        "metric": "entity_coverage",
+        "target": "symptoms,duration,medications,allergies,vitals when present",
+        "weight": 0.2,
+        "met": false
+      },
+      {
+        "id": "sc-safe-handoff",
+        "description": "Makes clinician validation requirements explicit.",
+        "metric": "validation_disclaimer_present",
+        "target": "yes",
+        "weight": 0.15,
+        "met": false
+      }
+    ],
+    "constraints": [
+      {
+        "id": "c-no-hallucinations",
+        "description": "Do not invent diagnoses, vitals, or medication details.",
+        "constraint_type": "hard",
+        "category": "safety",
+        "check": ""
+      },
+      {
+        "id": "c-clinician-review",
+        "description": "Outputs must be framed as clinician-assist only.",
+        "constraint_type": "hard",
+        "category": "safety",
+        "check": ""
+      }
+    ],
+    "context": {},
+    "required_capabilities": [],
+    "input_schema": {},
+    "output_schema": {},
+    "version": "1.0.0",
+    "parent_version": null,
+    "evolution_reason": null,
+    "created_at": "2026-03-22T00:00:00Z",
+    "updated_at": "2026-03-22T00:00:00Z"
+  },
+  "required_tools": [],
+  "metadata": {
+    "created_at": "2026-03-22T00:00:00Z",
+    "node_count": 4,
+    "edge_count": 3
+  }
+}

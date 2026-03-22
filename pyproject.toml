@@ -1,0 +1,22 @@
+[project]
+name = "clinic-copilot-mvp"
+version = "0.1.0"
+description = "Backend MVP for safe clinical documentation assistance."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.116.0",
+    "openai>=1.68.2",
+    "pydantic-settings>=2.7.0",
+    "uvicorn>=0.34.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

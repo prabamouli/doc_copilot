@@ -1,0 +1,187 @@
+{
+  "agent": {
+    "id": "note_safety_reviewer",
+    "name": "Note Safety Reviewer",
+    "version": "1.0.0",
+    "description": "Review generated clinical documentation for unsupported claims, missing safety details, and clinician-signoff risks."
+  },
+  "graph": {
+    "id": "note_safety_reviewer-graph",
+    "goal_id": "note-safety-goal",
+    "version": "1.0.0",
+    "entry_node": "load_note",
+    "entry_points": {
+      "start": "load_note"
+    },
+    "pause_nodes": [],
+    "terminal_nodes": [
+      "deliver_findings"
+    ],
+    "nodes": [
+      {
+        "id": "load_note",
+        "name": "Load Note",
+        "description": "Collect the note, transcript, and extracted entities that need safety review.",
+        "node_type": "event_loop",
+        "input_keys": [],
+        "output_keys": [
+          "note_payload"
+        ],
+        "nullable_output_keys": [],
+        "input_schema": {},
+        "output_schema": {},
+        "system_prompt": "You are the intake assistant for a clinical note safety review.\n\nAsk for the transcript and the generated note payload if they are not already available.\nIf the context already contains them, proceed immediately and call set_output(\"note_payload\", \"<payload>\").\nKeep the interaction minimal.",
+        "tools": [],
+        "model": null,
+        "function": null,
+        "routes": {},
+        "max_retries": 3,
+        "retry_on": [],
+        "max_node_visits": 1,
+        "output_model": null,
+        "max_validation_retries": 2,
+        "client_facing": true
+      },
+      {
+        "id": "safety_review",
+        "name": "Safety Review",
+        "description": "Inspect the draft note for missing allergies, missing vitals, contradictions, and unsupported claims.",
+        "node_type": "event_loop",
+        "input_keys": [
+          "note_payload"
+        ],
+        "output_keys": [
+          "review_findings"
+        ],
+        "nullable_output_keys": [],
+        "input_schema": {},
+        "output_schema": {},
+        "system_prompt": "You are a clinical documentation safety reviewer.\n\nReview note_payload and identify:\n- unsupported facts\n- contradictions between transcript and note\n- missing allergy documentation\n- missing medication specificity when relevant\n- missing vitals or exam detail when important\n- risky diagnostic certainty\n\nReturn a structured list of findings ranked by severity using set_output(\"review_findings\", \"<json>\").\nIf no material issues are found, say so explicitly.",
+        "tools": [],
+        "model": null,
+        "function": null,
+        "routes": {},
+        "max_retries": 3,
+        "retry_on": [],
+        "max_node_visits": 1,
+        "output_model": null,
+        "max_validation_retries": 2,
+        "client_facing": false
+      },
+      {
+        "id": "deliver_findings",
+        "name": "Deliver Findings",
+        "description": "Present review findings in a compact clinician-facing format.",
+        "node_type": "event_loop",
+        "input_keys": [
+          "review_findings"
+        ],
+        "output_keys": [
+          "review_summary"
+        ],
+        "nullable_output_keys": [],
+        "input_schema": {},
+        "output_schema": {},
+        "system_prompt": "You are presenting clinical note QA findings.\n\nSummarize findings in order of severity. If there are no significant findings, state that clearly but mention any residual documentation gaps.\nCall set_output(\"review_summary\", \"<summary>\").",
+        "tools": [],
+        "model": null,
+        "function": null,
+        "routes": {},
+        "max_retries": 3,
+        "retry_on": [],
+        "max_node_visits": 1,
+        "output_model": null,
+        "max_validation_retries": 2,
+        "client_facing": true
+      }
+    ],
+    "edges": [
+      {
+        "id": "load_note-to-safety_review",
+        "source": "load_note",
+        "target": "safety_review",
+        "condition": "on_success",
+        "condition_expr": null,
+        "priority": 1,
+        "input_mapping": {}
+      },
+      {
+        "id": "safety_review-to-deliver_findings",
+        "source": "safety_review",
+        "target": "deliver_findings",
+        "condition": "on_success",
+        "condition_expr": null,
+        "priority": 1,
+        "input_mapping": {}
+      }
+    ],
+    "max_steps": 50,
+    "max_retries_per_node": 3,
+    "description": "Runs a focused documentation QA pass before clinician sign-off.",
+    "created_at": "2026-03-22T00:00:00Z"
+  },
+  "goal": {
+    "id": "note-safety-goal",
+    "name": "Clinical Note Safety Review",
+    "description": "Find material documentation risks before a clinician finalizes a chart.",
+    "status": "draft",
+    "success_criteria": [
+      {
+        "id": "sc-find-risks",
+        "description": "Identifies unsupported or contradictory chart content.",
+        "metric": "material_findings_detected",
+        "target": "high recall",
+        "weight": 0.4,
+        "met": false
+      },
+      {
+        "id": "sc-prioritize",
+        "description": "Ranks findings by severity so clinicians can act fast.",
+        "metric": "severity_ordering_quality",
+        "target": "high",
+        "weight": 0.25,
+        "met": false
+      },
+      {
+        "id": "sc-compact-output",
+        "description": "Produces a quick-review output that fits clinician workflow.",
+        "metric": "review_time",
+        "target": "<2 minutes",
+        "weight": 0.2,
+        "met": false
+      },
+      {
+        "id": "sc-zero-fabrication",
+        "description": "Does not invent problems that are not grounded in the provided note and transcript.",
+        "metric": "false_positive_hallucination_rate",
+        "target": "low",
+        "weight": 0.15,
+        "met": false
+      }
+    ],
+    "constraints": [
+      {
+        "id": "c-grounded-review",
+        "description": "All findings must be grounded in the supplied note payload.",
+        "constraint_type": "hard",
+        "category": "quality",
+        "check": ""
+      }
+    ],
+    "context": {},
+    "required_capabilities": [],
+    "input_schema": {},
+    "output_schema": {},
+    "version": "1.0.0",
+    "parent_version": null,
+    "evolution_reason": null,
+    "created_at": "2026-03-22T00:00:00Z",
+    "updated_at": "2026-03-22T00:00:00Z"
+  },
+  "required_tools": [],
+  "metadata": {
+    "created_at": "2026-03-22T00:00:00Z",
+    "node_count": 3,
+    "edge_count": 2
+  }
+}

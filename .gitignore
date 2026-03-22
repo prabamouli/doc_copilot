@@ -1,0 +1,14 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+clinic_copilot.db
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+frontend/.dart_tool/
+frontend/build/
+frontend/macos/Flutter/ephemeral/
+frontend/ios/Flutter/ephemeral/
