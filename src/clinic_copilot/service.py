@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -234,7 +235,7 @@ if HAYSTACK_AVAILABLE:
         def __init__(self, repository: ClinicRepository) -> None:
             self._repository = repository
 
-        @component.output_types(documents=list[Document], query_embedding=list[float], query_text=str, top_k=int)
+        @component.output_types(patient_id=str, documents=list[Document], query_text=str, top_k=int)
         def run(self, patient_id: str, current_complaint: str, top_k: int = 5) -> dict[str, Any]:
             chunk_rows = self._repository.list_note_chunks(patient_id=patient_id, limit=1000)
             documents: list[Document] = []
@@ -242,15 +243,9 @@ if HAYSTACK_AVAILABLE:
                 text_chunk = str(row.get("text_chunk", "")).strip()
                 if not text_chunk:
                     continue
-                embedding = row.get("embedding")
-                if embedding is None:
-                    try:
-                        embedding = self._repository.embed_query(text_chunk)
-                    except Exception:
-                        embedding = None
                 doc = Document(
                     content=text_chunk,
-                    embedding=embedding,
+                    embedding=row.get("embedding"),
                     meta={
                         "visit_id": str(row.get("visit_id", "unknown-visit")),
                         "date": str(row.get("created_at", "unknown-date")),
@@ -258,10 +253,9 @@ if HAYSTACK_AVAILABLE:
                 )
                 documents.append(doc)
 
-            query_embedding = self._repository.embed_query(current_complaint)
             return {
+                "patient_id": patient_id,
                 "documents": documents,
-                "query_embedding": query_embedding,
                 "query_text": current_complaint,
                 "top_k": top_k,
             }
@@ -269,7 +263,8 @@ if HAYSTACK_AVAILABLE:
 
     @component
     class HybridRetrieveAndRerankComponent:
-        def __init__(self) -> None:
+        def __init__(self, repository: ClinicRepository) -> None:
+            self._repository = repository
             self._joiner = DocumentJoiner(join_mode="reciprocal_rank_fusion")
             self._reranker = None
             try:
@@ -285,7 +280,7 @@ if HAYSTACK_AVAILABLE:
         def run(
             self,
             documents: list[Document],
-            query_embedding: list[float],
+            patient_id: str,
             query_text: str,
             top_k: int,
         ) -> dict[str, list[dict[str, Any]]]:
@@ -294,16 +289,31 @@ if HAYSTACK_AVAILABLE:
 
             store = InMemoryDocumentStore()
             store.write_documents(documents)
-
-            embedding_retriever = InMemoryEmbeddingRetriever(document_store=store)
             bm25_retriever = InMemoryBM25Retriever(document_store=store)
 
             candidate_k = max(max(1, int(top_k)) * 2, max(1, settings.history_candidate_pool_size))
 
             try:
-                vector_hits = embedding_retriever.run(query_embedding=query_embedding, top_k=candidate_k)["documents"]
+                vector_rows = self._repository.search_note_chunks(
+                    patient_id=patient_id,
+                    query_text=query_text,
+                    top_k=candidate_k,
+                )
+                vector_hits = [
+                    Document(
+                        content=str(item.get("text_chunk", "")),
+                        meta={
+                            "visit_id": str(item.get("visit_id", "unknown-visit")),
+                            "date": str(item.get("created_at", "unknown-date")),
+                        },
+                        score=float(item.get("score", 0.0)),
+                    )
+                    for item in vector_rows
+                    if str(item.get("text_chunk", "")).strip()
+                ]
             except Exception:
                 vector_hits = []
+
             keyword_hits = bm25_retriever.run(query=query_text, top_k=candidate_k)["documents"]
 
             fused = self._joiner.run(documents=[vector_hits, keyword_hits])["documents"]
@@ -336,6 +346,7 @@ if HAYSTACK_AVAILABLE:
                 return {"historical_context": "No relevant historical context found."}
 
             lines: list[str] = ["Historical Context:"]
+            lines.extend(_historical_trend_lines(matches))
             for idx, match in enumerate(matches[:5], start=1):
                 visit_id = str(match.get("visit_id", "unknown-visit"))
                 date = str(match.get("date", "unknown-date"))
@@ -396,11 +407,11 @@ if HAYSTACK_AVAILABLE:
         def _build_pipeline(self) -> Pipeline:
             pipe = Pipeline()
             pipe.add_component("history_loader", PatientHistoryDocumentLoaderComponent(self._repository))
-            pipe.add_component("hybrid_retrieve", HybridRetrieveAndRerankComponent())
+            pipe.add_component("hybrid_retrieve", HybridRetrieveAndRerankComponent(self._repository))
             pipe.add_component("historical_formatter", HistoricalContextFormatterComponent())
             pipe.add_component("matches_output", RetrievedMatchesOutputComponent())
+            pipe.connect("history_loader.patient_id", "hybrid_retrieve.patient_id")
             pipe.connect("history_loader.documents", "hybrid_retrieve.documents")
-            pipe.connect("history_loader.query_embedding", "hybrid_retrieve.query_embedding")
             pipe.connect("history_loader.query_text", "hybrid_retrieve.query_text")
             pipe.connect("history_loader.top_k", "hybrid_retrieve.top_k")
             pipe.connect("hybrid_retrieve.matches", "historical_formatter.matches")
@@ -492,7 +503,8 @@ if HAYSTACK_AVAILABLE:
             if not replies:
                 raise ValueError("Generator returned no replies")
             raw_text = replies[0].text.strip()
-            return {"payload": json.loads(raw_text)}
+            restored_text = regulatory_vault.reidentify(raw_text)
+            return {"payload": json.loads(restored_text)}
 
 
     @component
@@ -989,6 +1001,36 @@ class ClinicalDocumentationService:
 
 def _normalize_text(value: str) -> str:
     return re.sub(r"[^a-z0-9\s]+", " ", value.lower()).strip()
+
+
+def _historical_trend_lines(matches: list[dict[str, Any]]) -> list[str]:
+    diagnosis_counter: Counter[str] = Counter()
+    bp_counter: Counter[str] = Counter()
+
+    for match in matches[:12]:
+        chunk = str(match.get("text_chunk", "")).strip()
+        if not chunk:
+            continue
+
+        for diagnosis in re.findall(r"(?:assessment|diagnosis)\s*[:\-]\s*([A-Za-z0-9\-\s,]+)", chunk, flags=re.IGNORECASE):
+            normalized = " ".join(diagnosis.split()).strip(".,; ").lower()
+            if normalized and normalized not in {"unknown", "n/a", "none"}:
+                diagnosis_counter[normalized] += 1
+
+        for bp in re.findall(r"\b(?:bp|blood pressure)\s*[:\-]?\s*(\d{2,3}/\d{2,3})\b", chunk, flags=re.IGNORECASE):
+            bp_counter[bp] += 1
+
+    lines: list[str] = []
+    if diagnosis_counter:
+        common_diagnoses = ", ".join(item[0] for item in diagnosis_counter.most_common(3))
+        lines.append(f"Trend - recurring diagnoses: {common_diagnoses}")
+    if bp_counter:
+        common_bp = ", ".join(item[0] for item in bp_counter.most_common(3))
+        lines.append(f"Trend - repeated BP readings: {common_bp}")
+
+    if not lines:
+        lines.append("Trend - no strong historical diagnosis/vitals trend detected.")
+    return lines
 
 
 def _extract_conversation_turns(transcript: str) -> list[tuple[str, str]]:

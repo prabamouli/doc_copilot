@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any
 
-from openai import OpenAI
+from litellm import completion
 
 from clinic_copilot.config import settings
 from clinic_copilot.prompts import (
@@ -34,25 +34,23 @@ from clinic_copilot.schemas import (
 
 class LLMClient:
     def __init__(self) -> None:
-        self._client: OpenAI | None = None
-
-        if settings.openai_api_key:
-            client_kwargs: dict[str, str] = {"api_key": settings.openai_api_key}
-            if settings.openai_base_url:
-                client_kwargs["base_url"] = settings.openai_base_url
-            self._client = OpenAI(**client_kwargs)
+        self._gateway_enabled = bool(settings.openai_api_key or settings.openai_base_url)
+        self._standard_model = settings.llm_standard_model or settings.openai_model or settings.ollama_model
+        self._clinical_reasoning_model = (
+            settings.llm_clinical_reasoning_model or settings.openai_model or self._standard_model
+        )
 
     def generate_clinical_note(self, request: ClinicalNoteRequest) -> ClinicalNoteResponse:
-        if self._client is None:
+        if not self._gateway_enabled:
             return self._fallback_note(request)
 
-        entities_payload = self._call_json(build_entity_extraction_prompt(request))
+        entities_payload = self._call_json(build_entity_extraction_prompt(request), priority="Standard")
         entities = self._parse_entities(entities_payload)
 
-        soap_payload = self._call_json(build_soap_prompt(request))
+        soap_payload = self._call_json(build_soap_prompt(request), priority="Standard")
         soap_draft = SoapDraftOutput.model_validate(soap_payload)
 
-        diagnosis_payload = self._call_json(build_diagnosis_prompt(entities))
+        diagnosis_payload = self._call_json(build_diagnosis_prompt(entities), priority="Clinical_Reasoning")
         diagnosis_items = diagnosis_payload.get("conditions", [])
         differential = [
             DifferentialDiagnosisItem(
@@ -66,6 +64,8 @@ class LLMClient:
 
         treatment_payload = self._call_json(
             build_treatment_prompt(entities, request.include_differential_diagnosis)
+            ,
+            priority="Clinical_Reasoning",
         )
         treatment = TreatmentPlanDraft.model_validate(treatment_payload)
 
@@ -77,6 +77,8 @@ class LLMClient:
                 diagnosis_items,
                 treatment_payload,
             )
+            ,
+            priority="Clinical_Reasoning",
         )
         validation = ValidationResult.model_validate(validation_payload)
 
@@ -150,22 +152,73 @@ class LLMClient:
             ],
         )
 
-    def _call_json(self, prompt: str) -> Any:
-        assert self._client is not None
-        masked_prompt = regulatory_vault.sanitize_for_llm(
+    def _dispatch_model(self, priority: str) -> str:
+        if priority == "Clinical_Reasoning":
+            return self._clinical_reasoning_model
+        return self._standard_model
+
+    def _call_json(self, prompt: str, priority: str = "Standard") -> Any:
+        masked_payload = regulatory_vault.deidentify(
             text=prompt,
-            route="openai.responses.create",
-            metadata={"model": settings.openai_model},
+            route="litellm.completion",
+            metadata={"priority": priority, "model": self._dispatch_model(priority)},
         )
-        response = self._client.responses.create(
-            model=settings.openai_model,
-            input=[
+        response_text = self._safe_completion_json(
+            messages=[
                 {"role": "system", "content": build_system_prompt()},
-                {"role": "user", "content": masked_prompt},
+                {"role": "user", "content": str(masked_payload["deidentified_text"])},
             ],
-            text={"format": {"type": "json_object"}},
+            priority=priority,
         )
-        return json.loads(response.output_text)
+        reidentified = regulatory_vault.reidentify(response_text, mapping_id=str(masked_payload["mapping_id"]))
+        return json.loads(reidentified)
+
+    def _safe_completion_json(self, messages: list[dict[str, str]], priority: str) -> str:
+        model = self._dispatch_model(priority)
+        try:
+            response = completion(
+                model=model,
+                api_base=settings.openai_base_url,
+                api_key=settings.openai_api_key,
+                messages=messages,
+                response_format={"type": "json_object"},
+                timeout=max(10, int(settings.llm_timeout_seconds)),
+            )
+            return str(response.choices[0].message.content)
+        except Exception as exc:
+            if priority != "Clinical_Reasoning":
+                raise RuntimeError(f"LiteLLM standard inference failed: {exc}") from exc
+
+            if not self._is_fallback_eligible(exc):
+                raise RuntimeError(f"LiteLLM clinical reasoning inference failed: {exc}") from exc
+
+            try:
+                fallback_response = completion(
+                    model=self._standard_model,
+                    api_base=settings.openai_base_url,
+                    api_key=settings.openai_api_key,
+                    messages=messages,
+                    response_format={"type": "json_object"},
+                    timeout=max(10, int(settings.llm_timeout_seconds)),
+                )
+                return str(fallback_response.choices[0].message.content)
+            except Exception as fallback_exc:
+                raise RuntimeError(
+                    "LiteLLM clinical reasoning fallback failed after local gateway error: "
+                    f"primary={exc}; fallback={fallback_exc}"
+                ) from fallback_exc
+
+    def _is_fallback_eligible(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        trigger_phrases = (
+            "connection refused",
+            "failed to establish a new connection",
+            "gpu out of memory",
+            "cuda out of memory",
+            "out of memory",
+            "oom",
+        )
+        return any(token in message for token in trigger_phrases)
 
     def _parse_entities(self, payload: dict[str, list[str]]) -> ClinicalEntities:
         def facts(key: str) -> list[ExtractedFact]:

@@ -3,7 +3,7 @@
     "id": "billing_optimizer_agent",
     "name": "Billing Optimizer Agent",
     "version": "1.0.0",
-    "description": "Detects potential revenue leakage by matching SOAP procedures to CPT and assessment conditions to ICD-10, then flagging missing summary capture."
+    "description": "Revenue guardrail that identifies uncaptured revenue by mapping documented procedures to high-value CPT codes and generating Revenue Optimization Flags with estimated dollars and supporting evidence."
   },
   "graph": {
     "id": "billing_optimizer_agent-graph",
@@ -123,7 +123,7 @@
   "goal": {
     "id": "billing-optimization-goal",
     "name": "Billing Optimization",
-    "description": "Reduce missed reimbursement by flagging uncaptured billable procedures and suggesting CPT codes.",
+    "description": "Reduce missed reimbursement by flagging uncaptured billable procedures and returning code suggestions, estimated recovered revenue, and exact supporting note evidence.",
     "status": "draft",
     "success_criteria": [
       {

@@ -5,6 +5,9 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "llama3.2:1b"
     openai_base_url: str | None = None
+    llm_standard_model: str = "llama3.2:1b"
+    llm_clinical_reasoning_model: str = "llama3.2:1b"
+    llm_timeout_seconds: int = 90
     litellm_master_key: str = "sk-local"
     ollama_model: str = "llama3.2:1b"
     app_name: str = "Clinic Copilot MVP"

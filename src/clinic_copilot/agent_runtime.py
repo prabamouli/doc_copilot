@@ -39,42 +39,56 @@ DEFAULT_CPT_CODES: list[dict[str, Any]] = [
         "procedure_key": "electrocardiogram",
         "description": "Electrocardiogram, routine ECG with at least 12 leads; with interpretation and report",
         "synonyms": ["ecg", "ekg", "electrocardiogram", "12 lead"],
+        "estimated_value_usd": 45.0,
     },
     {
         "code": "71046",
         "procedure_key": "chest_xray_2_view",
         "description": "Radiologic exam, chest; 2 views",
         "synonyms": ["chest xray", "chest x-ray", "cxr", "x ray chest"],
+        "estimated_value_usd": 58.0,
     },
     {
         "code": "87880",
         "procedure_key": "rapid_strep_test",
         "description": "Infectious agent antigen detection by immunoassay with direct optical observation; Streptococcus",
         "synonyms": ["rapid strep", "strep test", "throat swab"],
+        "estimated_value_usd": 28.0,
     },
     {
         "code": "81002",
         "procedure_key": "urinalysis_dipstick",
         "description": "Urinalysis, by dip stick or tablet reagent; non-automated, without microscopy",
         "synonyms": ["urinalysis", "urine dip", "urine test", "dipstick"],
+        "estimated_value_usd": 16.0,
     },
     {
         "code": "94640",
         "procedure_key": "nebulizer_treatment",
         "description": "Pressurized or nonpressurized inhalation treatment for acute airway obstruction",
         "synonyms": ["nebulizer", "neb treatment", "inhalation treatment"],
+        "estimated_value_usd": 36.0,
     },
     {
         "code": "96372",
         "procedure_key": "therapeutic_injection",
         "description": "Therapeutic, prophylactic, or diagnostic injection, subcutaneous or intramuscular",
         "synonyms": ["intramuscular injection", "im injection", "subcutaneous injection", "shot given"],
+        "estimated_value_usd": 22.0,
     },
     {
         "code": "20552",
         "procedure_key": "trigger_point_injection",
         "description": "Injection(s); single or multiple trigger point(s), one or two muscle groups",
         "synonyms": ["trigger point injection", "muscle injection"],
+        "estimated_value_usd": 85.0,
+    },
+    {
+        "code": "17000",
+        "procedure_key": "cryotherapy_lesion_destruction",
+        "description": "Destruction of premalignant lesion; first lesion",
+        "synonyms": ["cryotherapy", "cryo treatment", "lesion destruction"],
+        "estimated_value_usd": 72.0,
     },
 ]
 
@@ -353,7 +367,7 @@ class CptCodeStore:
             with sqlite3.connect(db_file) as connection:
                 connection.row_factory = sqlite3.Row
                 rows = connection.execute(
-                    "SELECT code, procedure_key, description, synonyms_json FROM cpt_codes ORDER BY code"
+                    "SELECT code, procedure_key, description, synonyms_json, estimated_value_usd FROM cpt_codes ORDER BY code"
                 ).fetchall()
             return [
                 {
@@ -361,6 +375,7 @@ class CptCodeStore:
                     "procedure_key": row["procedure_key"],
                     "description": row["description"],
                     "synonyms": json.loads(row["synonyms_json"]),
+                    "estimated_value_usd": float(row["estimated_value_usd"]),
                 }
                 for row in rows
             ]
@@ -369,7 +384,9 @@ class CptCodeStore:
             psycopg = importlib.import_module("psycopg")
             with psycopg.connect(self._database_url) as connection:  # type: ignore[no-untyped-call]
                 with connection.cursor() as cursor:
-                    cursor.execute("SELECT code, procedure_key, description, synonyms_json FROM cpt_codes ORDER BY code")
+                    cursor.execute(
+                        "SELECT code, procedure_key, description, synonyms_json, estimated_value_usd FROM cpt_codes ORDER BY code"
+                    )
                     rows = cursor.fetchall()
             return [
                 {
@@ -377,6 +394,7 @@ class CptCodeStore:
                     "procedure_key": row[1],
                     "description": row[2],
                     "synonyms": row[3],
+                    "estimated_value_usd": float(row[4] or 0),
                 }
                 for row in rows
             ]
@@ -394,10 +412,14 @@ class CptCodeStore:
                         code TEXT PRIMARY KEY,
                         procedure_key TEXT NOT NULL,
                         description TEXT NOT NULL,
-                        synonyms_json TEXT NOT NULL
+                        synonyms_json TEXT NOT NULL,
+                        estimated_value_usd REAL NOT NULL DEFAULT 0
                     )
                     """
                 )
+                columns = [row[1] for row in connection.execute("PRAGMA table_info(cpt_codes)").fetchall()]
+                if "estimated_value_usd" not in columns:
+                    connection.execute("ALTER TABLE cpt_codes ADD COLUMN estimated_value_usd REAL NOT NULL DEFAULT 0")
             return
 
         if self._is_postgres:
@@ -410,9 +432,13 @@ class CptCodeStore:
                             code TEXT PRIMARY KEY,
                             procedure_key TEXT NOT NULL,
                             description TEXT NOT NULL,
-                            synonyms_json JSONB NOT NULL
+                            synonyms_json JSONB NOT NULL,
+                            estimated_value_usd DOUBLE PRECISION NOT NULL DEFAULT 0
                         )
                         """
+                    )
+                    cursor.execute(
+                        "ALTER TABLE cpt_codes ADD COLUMN IF NOT EXISTS estimated_value_usd DOUBLE PRECISION NOT NULL DEFAULT 0"
                     )
                 connection.commit()
             return
@@ -426,15 +452,20 @@ class CptCodeStore:
                 for item in DEFAULT_CPT_CODES:
                     connection.execute(
                         """
-                        INSERT OR IGNORE INTO cpt_codes (code, procedure_key, description, synonyms_json)
-                        VALUES (?, ?, ?, ?)
+                        INSERT OR IGNORE INTO cpt_codes (code, procedure_key, description, synonyms_json, estimated_value_usd)
+                        VALUES (?, ?, ?, ?, ?)
                         """,
                         (
                             item["code"],
                             item["procedure_key"],
                             item["description"],
                             json.dumps(item["synonyms"]),
+                            float(item.get("estimated_value_usd", 0.0)),
                         ),
+                    )
+                    connection.execute(
+                        "UPDATE cpt_codes SET estimated_value_usd = ? WHERE code = ?",
+                        (float(item.get("estimated_value_usd", 0.0)), item["code"]),
                     )
             return
 
@@ -445,15 +476,20 @@ class CptCodeStore:
                     for item in DEFAULT_CPT_CODES:
                         cursor.execute(
                             """
-                            INSERT INTO cpt_codes (code, procedure_key, description, synonyms_json)
-                            VALUES (%s, %s, %s, %s)
-                            ON CONFLICT (code) DO NOTHING
+                            INSERT INTO cpt_codes (code, procedure_key, description, synonyms_json, estimated_value_usd)
+                            VALUES (%s, %s, %s, %s, %s)
+                            ON CONFLICT (code) DO UPDATE
+                            SET procedure_key = EXCLUDED.procedure_key,
+                                description = EXCLUDED.description,
+                                synonyms_json = EXCLUDED.synonyms_json,
+                                estimated_value_usd = EXCLUDED.estimated_value_usd
                             """,
                             (
                                 item["code"],
                                 item["procedure_key"],
                                 item["description"],
                                 json.dumps(item["synonyms"]),
+                                float(item.get("estimated_value_usd", 0.0)),
                             ),
                         )
                 connection.commit()
@@ -872,11 +908,13 @@ class BillingOptimizerAgent:
         return str(self.config["agent"]["name"])
 
     def run(self, note: ClinicalNoteResponse) -> dict[str, Any]:
-        summary_text = _normalize_text(note.summary)
         soap_text = _normalize_text(_soap_as_text(note))
-        assessment_text = _normalize_text(note.soap_note.assessment.text)
+        note_sentences = _split_text_into_sentences(_soap_as_text(note))
+        note_dump = _normalize_text(json.dumps(note.model_dump(), separators=(",", ":")))
+        explicit_codes = set(re.findall(r"\b\d{5}\b", note_dump))
 
         potential_leakage: list[dict[str, Any]] = []
+        revenue_flags: list[dict[str, Any]] = []
         matched_codes: list[dict[str, Any]] = []
         for code in self._cpt_store.list_codes():
             synonyms = [str(item).lower().strip() for item in code.get("synonyms", []) if str(item).strip()]
@@ -892,23 +930,39 @@ class BillingOptimizerAgent:
                     "cpt_code": code["code"],
                     "procedure": code["procedure_key"],
                     "description": code["description"],
+                    "estimated_value_usd": float(code.get("estimated_value_usd", 0.0)),
                 }
             )
 
-            captured_in_summary = any(_phrase_in_text(term, summary_text) for term in synonyms)
-            if captured_in_summary:
+            if code["code"] in explicit_codes:
                 continue
+
+            evidence_sentence = _find_evidence_sentence(note_sentences, synonyms) or note.soap_note.assessment.text
+            estimated_value = round(float(code.get("estimated_value_usd", 0.0)), 2)
 
             potential_leakage.append(
                 {
                     "flag": "Potential Revenue Leakage",
                     "cpt_code": code["code"],
                     "procedure": code["procedure_key"],
-                    "reason": "Procedure appears in SOAP note but is not captured in summary.",
-                    "suggestion": f"Include billable procedure context and verify CPT {code['code']} ({code['description']}).",
+                    "reason": "Procedure documented in SOAP note without explicit billing code.",
+                    "suggestion": (
+                        f"Add CPT {code['code']} ({code['description']}) if clinically appropriate; "
+                        f"estimated recoverable value ${estimated_value:.2f}."
+                    ),
+                }
+            )
+            revenue_flags.append(
+                {
+                    "flag": "Revenue Optimization Flag",
+                    "suggested_code": code["code"],
+                    "estimated_recovered_usd": estimated_value,
+                    "procedure": code["procedure_key"],
+                    "evidence_sentence": evidence_sentence,
                 }
             )
 
+        assessment_text = _normalize_text(note.soap_note.assessment.text)
         matched_icd10: list[dict[str, Any]] = []
         potential_icd10_leakage: list[dict[str, Any]] = []
         for code in self._icd10_store.list_codes():
@@ -928,8 +982,7 @@ class BillingOptimizerAgent:
                 }
             )
 
-            captured_in_summary = any(_phrase_in_text(term, summary_text) for term in synonyms)
-            if captured_in_summary:
+            if code["code"] in explicit_codes:
                 continue
 
             potential_icd10_leakage.append(
@@ -945,9 +998,15 @@ class BillingOptimizerAgent:
         return {
             "matched_billable_codes": matched_codes,
             "potential_revenue_leakage": potential_leakage,
+            "revenue_optimization_flags": revenue_flags,
+            "estimated_recovered_usd_total": round(
+                sum(float(item.get("estimated_recovered_usd", 0.0)) for item in revenue_flags),
+                2,
+            ),
             "matched_icd10_codes": matched_icd10,
             "potential_icd10_leakage": potential_icd10_leakage,
             "has_revenue_leakage": bool(potential_leakage or potential_icd10_leakage),
+            "has_revenue_optimization_flags": bool(revenue_flags),
         }
 
 
@@ -1088,6 +1147,41 @@ class AgentRuntime:
                 },
             )
 
+        billing_scan = None
+        clinical_note_payload = scribe_output.get("clinical_note")
+        if isinstance(clinical_note_payload, dict):
+            try:
+                generated_note = ClinicalNoteResponse.model_validate(clinical_note_payload)
+                billing_scan = self._billing_agent.run(generated_note)
+                scribe_output["revenue_optimization_flags"] = billing_scan.get("revenue_optimization_flags", [])
+                scribe_output["estimated_recovered_usd_total"] = billing_scan.get("estimated_recovered_usd_total", 0.0)
+
+                for item in billing_scan.get("revenue_optimization_flags", []):
+                    note_flag = ReviewFlag(
+                        issue=(
+                            f"Revenue Optimization Flag: CPT {item.get('suggested_code', 'unknown')} "
+                            "may be uncaptured"
+                        ),
+                        severity="warning",
+                        recommendation=str(item.get("evidence_sentence", "Review billing evidence in SOAP note.")),
+                    )
+                    scribe_output.setdefault("review_flags", [])
+                    scribe_output["review_flags"].append(note_flag.model_dump())
+
+                self._audit_store.log_event(
+                    run_id,
+                    case_id,
+                    self._billing_agent.id,
+                    self._billing_agent.name,
+                    "revenue_optimization_flagged",
+                    {
+                        "flag_count": len(billing_scan.get("revenue_optimization_flags", [])),
+                        "estimated_recovered_usd_total": billing_scan.get("estimated_recovered_usd_total", 0.0),
+                    },
+                )
+            except Exception:
+                billing_scan = None
+
         return {
             "run_id": run_id,
             "case_id": case_id,
@@ -1096,6 +1190,7 @@ class AgentRuntime:
                 "vitals": intake_output.get("vitals", []),
             },
             "scribe": scribe_output,
+            "billing_optimizer": billing_scan,
             "audit": {
                 "database": settings.database_url,
                 "table": "agent_run_logs",
@@ -1380,6 +1475,18 @@ def _normalize_text(value: str) -> str:
     lowered = value.lower()
     cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in lowered)
     return " ".join(cleaned.split())
+
+
+def _find_evidence_sentence(sentences: list[str], phrases: list[str]) -> str:
+    normalized_sentences = [(sentence, _normalize_text(sentence)) for sentence in sentences if sentence.strip()]
+    for phrase in phrases:
+        normalized_phrase = _normalize_text(phrase)
+        if not normalized_phrase:
+            continue
+        for original_sentence, normalized_sentence in normalized_sentences:
+            if normalized_phrase in normalized_sentence:
+                return original_sentence
+    return ""
 
 
 def _split_text_into_sentences(text: str) -> list[str]:

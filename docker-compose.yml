@@ -1,0 +1,183 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: clinic-copilot-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+      langfuse-web:
+        condition: service_started
+    environment:
+      OPENAI_API_KEY: "sk-local"
+      OPENAI_BASE_URL: "http://ollama:11434/v1"
+      OPENAI_MODEL: "llama3.2:1b"
+      OLLAMA_MODEL: "llama3.2:1b"
+      LLM_STANDARD_MODEL: "llama3.2:1b"
+      LLM_CLINICAL_REASONING_MODEL: "llama3.2:1b"
+      DATABASE_URL: "postgresql://clinic:clinic@postgres:5432/clinic_copilot"
+      VECTOR_DATABASE_URL: "postgresql://clinic:clinic@postgres:5432/clinic_copilot"
+      VAULT_ENCRYPTION_SECRET: "replace-with-long-random-secret"
+      ALLOW_REMOTE_MODEL_DOWNLOADS: "false"
+      LANGFUSE_HOST: "http://langfuse-web:3000"
+      LANGFUSE_PUBLIC_KEY: "pk-local"
+      LANGFUSE_SECRET_KEY: "sk-local"
+    ports:
+      - "8000:8000"
+    command: >
+      gunicorn clinic_copilot.main:app
+      --chdir /app/src
+      --bind 0.0.0.0:8000
+      --workers 4
+      --worker-class uvicorn.workers.UvicornWorker
+      --timeout 120
+    networks:
+      - clinic_internal
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: clinic-copilot-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./docker/ollama-init.sh:/ollama-init.sh:ro
+    entrypoint: ["/bin/sh", "/ollama-init.sh"]
+    environment:
+      OLLAMA_MODELS: "llama3.2:1b"
+    networks:
+      - clinic_internal
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: clinic-copilot-postgres
+    environment:
+      POSTGRES_USER: "clinic"
+      POSTGRES_PASSWORD: "clinic"
+      POSTGRES_DB: "clinic_copilot"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clinic -d clinic_copilot"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - clinic_internal
+
+  redis:
+    image: redis:7-alpine
+    container_name: clinic-copilot-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks:
+      - clinic_internal
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3-alpine
+    container_name: clinic-copilot-clickhouse
+    environment:
+      CLICKHOUSE_DB: "langfuse"
+      CLICKHOUSE_USER: "default"
+      CLICKHOUSE_PASSWORD: ""
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    networks:
+      - clinic_internal
+
+  minio:
+    image: minio/minio:latest
+    container_name: clinic-copilot-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: "minio"
+      MINIO_ROOT_PASSWORD: "minio123"
+    volumes:
+      - minio_data:/data
+    networks:
+      - clinic_internal
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: clinic-copilot-minio-init
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minio minio123 &&
+      mc mb -p local/langfuse || true
+      "
+    networks:
+      - clinic_internal
+
+  langfuse-web:
+    image: langfuse/langfuse:2
+    container_name: clinic-copilot-langfuse-web
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_started
+      redis:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      NEXTAUTH_URL: "http://localhost:3000"
+      NEXTAUTH_SECRET: "replace-with-nextauth-secret"
+      DATABASE_URL: "postgresql://clinic:clinic@postgres:5432/clinic_copilot"
+      SALT: "replace-with-langfuse-salt"
+      CLICKHOUSE_URL: "http://clickhouse:8123"
+      CLICKHOUSE_MIGRATION_URL: "clickhouse://clickhouse:9000"
+      CLICKHOUSE_USER: "default"
+      CLICKHOUSE_PASSWORD: ""
+      REDIS_HOST: "redis"
+      REDIS_PORT: "6379"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: "langfuse"
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: "us-east-1"
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: "minio"
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: "minio123"
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: "http://minio:9000"
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      TELEMETRY_ENABLED: "false"
+    command: ["sh", "-c", "./web/entrypoint.sh"]
+    networks:
+      - clinic_internal
+
+  langfuse-worker:
+    image: langfuse/langfuse:2
+    container_name: clinic-copilot-langfuse-worker
+    depends_on:
+      langfuse-web:
+        condition: service_started
+    environment:
+      DATABASE_URL: "postgresql://clinic:clinic@postgres:5432/clinic_copilot"
+      CLICKHOUSE_URL: "http://clickhouse:8123"
+      CLICKHOUSE_MIGRATION_URL: "clickhouse://clickhouse:9000"
+      CLICKHOUSE_USER: "default"
+      CLICKHOUSE_PASSWORD: ""
+      REDIS_HOST: "redis"
+      REDIS_PORT: "6379"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: "langfuse"
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: "us-east-1"
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: "minio"
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: "minio123"
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: "http://minio:9000"
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      TELEMETRY_ENABLED: "false"
+    command: ["sh", "-c", "./worker/entrypoint.sh"]
+    networks:
+      - clinic_internal
+
+networks:
+  clinic_internal:
+    driver: bridge
+    internal: true
+
+volumes:
+  ollama_data:
+  pg_data:
+  clickhouse_data:
+  minio_data:
