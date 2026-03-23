@@ -1,7 +1,11 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:speech_to_text/speech_recognition_result.dart';
+import 'package:speech_to_text/speech_to_text.dart';
 
 import 'api.dart';
 import 'models.dart';
@@ -69,14 +73,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
   VisionObjectiveResponse? _latestVisionObjective;
   Timer? _conversationCaptureTimer;
   Timer? _clinicalNudgeTimer;
-  ClinicalNudgeSocket? _clinicalNudgeSocket;
-  StreamSubscription<ClinicalNudgeEvent>? _clinicalNudgeSubscription;
   final ImagePicker _imagePicker = ImagePicker();
   bool _ambientNudgesEnabled = true;
+  String _nudgeSensitivity = 'medium';
   bool _analyzingVision = false;
-  int _observerElapsedSeconds = 0;
+  bool _generatingPatientAvs = false;
+  PatientAfterVisitSummary? _latestPatientAvs;
+  OfflineReadinessStatus? _offlineReadiness;
+  bool _loadingOfflineReadiness = false;
   String? _lastNudgeId;
   WorkspaceView _workspaceView = WorkspaceView.overview;
+
+  // Voice assistant state
+  final SpeechToText _speech = SpeechToText();
+  final FlutterTts _tts = FlutterTts();
+  bool _speechAvailable = false;
 
   @override
   void initState() {
@@ -85,14 +96,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _load();
     _startConversationCaptureLoop();
     _startClinicalNudgeLoop();
+    _initSpeech();
   }
 
   @override
   void dispose() {
     _conversationCaptureTimer?.cancel();
     _clinicalNudgeTimer?.cancel();
-    _clinicalNudgeSubscription?.cancel();
-    unawaited(_clinicalNudgeSocket?.close());
     _mainScrollController.dispose();
     _reviewerController.dispose();
     _feedbackController.dispose();
@@ -111,7 +121,49 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _vitalsController.dispose();
     _agentTranscriptController.dispose();
     _searchController.dispose();
+    _speech.cancel();
+    _tts.stop();
     super.dispose();
+  }
+
+  Future<void> _initSpeech() async {
+    final available = await _speech.initialize(
+      onError: (_) {},
+      onStatus: (_) {},
+    );
+    if (mounted) setState(() => _speechAvailable = available);
+  }
+
+  void _showVoiceAssistantSheet() {
+    final caseId = _caseRecord?.caseId ?? '';
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _VoiceAssistantSheet(
+        api: _api,
+        caseId: caseId,
+        speech: _speech,
+        tts: _tts,
+        speechAvailable: _speechAvailable,
+        onActionCode: (actionCode) {
+          Navigator.of(context).pop();
+          switch (actionCode) {
+            case 'navigate_agents':
+              _openWorkspace(WorkspaceView.agents);
+            case 'navigate_audit':
+              _openWorkspace(WorkspaceView.audit);
+            case 'navigate_note_studio':
+              _openWorkspace(WorkspaceView.noteStudio);
+            case 'approve_note':
+            case 'request_changes':
+              _load();
+            default:
+              break;
+          }
+        },
+      ),
+    );
   }
 
   void _startConversationCaptureLoop() {
@@ -122,24 +174,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _startClinicalNudgeLoop() {
-    _clinicalNudgeSubscription?.cancel();
     _clinicalNudgeTimer?.cancel();
-    unawaited(_clinicalNudgeSocket?.close());
-    _clinicalNudgeSocket = null;
 
     if (!_ambientNudgesEnabled) {
       return;
     }
 
-    _clinicalNudgeSocket = _api.connectClinicalNudges();
-    _clinicalNudgeSubscription = _clinicalNudgeSocket!.events.listen(_handleClinicalNudgeEvent);
-
     _clinicalNudgeTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      _sendClinicalNudgeObservation();
+      unawaited(_sendClinicalNudgeObservation());
     });
   }
 
-  void _sendClinicalNudgeObservation() {
+  Future<void> _sendClinicalNudgeObservation() async {
     if (!_ambientNudgesEnabled) return;
     final caseRecord = _caseRecord;
     if (caseRecord == null) return;
@@ -147,12 +193,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final transcript = caseRecord.transcript.trim();
     if (transcript.isEmpty) return;
 
-    _observerElapsedSeconds += 30;
-    _clinicalNudgeSocket?.observe(
-      caseId: caseRecord.caseId,
-      transcript: transcript,
-      elapsedSeconds: _observerElapsedSeconds,
-    );
+    try {
+      final payload = await _api.orchestratorDuringVisit(
+        caseId: caseRecord.caseId,
+        transcriptChunk: transcript,
+        sensitivity: _nudgeSensitivity,
+      );
+      final nudge = payload.nudge;
+      if (nudge != null) {
+        _handleClinicalNudgeEvent(nudge);
+      }
+    } catch (_) {
+      // Silent failure for ambient polling.
+    }
   }
 
   void _handleClinicalNudgeEvent(ClinicalNudgeEvent event) {
@@ -217,6 +270,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       });
       _syncDraftControllers(selectedCase);
       unawaited(_loadHistoryCitations(selectedCase));
+      unawaited(_loadOfflineReadiness());
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -282,8 +336,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _switchingCase = false;
         _workspaceView = WorkspaceView.overview;
       });
-      _observerElapsedSeconds = 0;
       _lastNudgeId = null;
+      _latestPatientAvs = null;
       _syncDraftControllers(selectedCase);
       unawaited(_loadHistoryCitations(selectedCase));
       _showMessage('Opened ${selectedCase.patientLabel}');
@@ -306,6 +360,36 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _error = null;
     });
     try {
+      if (status == 'approved') {
+        final postVisit = await _api.orchestratorPostVisit(caseRecord.caseId);
+        if (!postVisit.signAllowed) {
+          final validationIssues = (postVisit.preSignValidation['issues'] as List<dynamic>? ?? const [])
+              .map((item) => item.toString())
+              .toList();
+          if (!mounted) return;
+          setState(() {
+            _submitting = false;
+            _error = validationIssues.isEmpty
+                ? 'Pre-sign validation failed. Review generated outputs before approval.'
+                : validationIssues.join(' | ');
+            final billing = postVisit.outputs['billing'];
+            if (billing is Map) {
+              _latestBillingResponse = AgentRunResponse(
+                agentId: 'billing_optimizer_agent',
+                agentName: 'Billing Optimizer Agent',
+                result: Map<String, dynamic>.from(billing),
+              );
+            }
+            final patient = postVisit.outputs['patient'];
+            if (patient is Map) {
+              _latestPatientAvs = PatientAfterVisitSummary.fromJson(Map<String, dynamic>.from(patient));
+            }
+          });
+          _showMessage('Sign blocked by orchestrator consistency checks.');
+          return;
+        }
+      }
+
       final updatedCase = await _api.submitReview(
         caseId: caseRecord.caseId,
         status: status,
@@ -416,13 +500,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _error = null;
     });
     try {
-      final response = await _api.runBillingOptimizer(caseRecord.caseId);
+      final postVisit = await _api.orchestratorPostVisit(caseRecord.caseId);
+      final billingPayload = postVisit.outputs['billing'];
+      if (billingPayload is! Map) {
+        throw Exception('Orchestrator post-visit did not return billing output.');
+      }
       if (!mounted) return;
       setState(() {
-        _latestBillingResponse = response;
+        _latestBillingResponse = AgentRunResponse(
+          agentId: 'billing_optimizer_agent',
+          agentName: 'Billing Optimizer Agent',
+          result: Map<String, dynamic>.from(billingPayload),
+        );
+        final patientPayload = postVisit.outputs['patient'];
+        if (patientPayload is Map) {
+          _latestPatientAvs = PatientAfterVisitSummary.fromJson(Map<String, dynamic>.from(patientPayload));
+        }
         _runningBillingAgent = false;
       });
-      _showMessage('Billing optimizer finished');
+      _showMessage('Post-visit orchestrator finished (billing + patient summary).');
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -436,12 +532,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final caseRecord = _caseRecord;
     if (caseRecord == null) return;
 
+    final source = await _showMediaSourceSheet(mediaType);
+    if (source == null) return;
+
     XFile? selected;
-    if (mediaType == 'video') {
-      selected = await _imagePicker.pickVideo(source: ImageSource.camera, maxDuration: const Duration(seconds: 20));
-    } else {
-      selected = await _imagePicker.pickImage(source: ImageSource.camera, imageQuality: 85);
+    try {
+      if (mediaType == 'video') {
+        selected = await _imagePicker.pickVideo(source: source, maxDuration: const Duration(seconds: 20));
+      } else {
+        selected = await _imagePicker.pickImage(source: source, imageQuality: 85);
+      }
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      _showMessage('Media access denied: ${e.message ?? e.code}. Check app permissions.');
+      return;
+    } catch (_) {
+      if (!mounted) return;
+      _showMessage('Could not open media picker. Try using the photo library option.');
+      return;
     }
+
     if (selected == null) return;
 
     setState(() {
@@ -461,11 +571,107 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (injected.isNotEmpty && !currentObjective.contains(injected)) {
         _objectiveController.text = currentObjective.isEmpty ? injected : '$currentObjective\n$injected';
       }
+      _openWorkspace(WorkspaceView.noteStudio);
       _showMessage('Objective auto-injected from ${mediaType == 'video' ? 'gait video' : 'wound image'}.');
     } catch (error) {
       if (!mounted) return;
       setState(() {
         _analyzingVision = false;
+        _error = '$error';
+      });
+    }
+  }
+
+  Future<ImageSource?> _showMediaSourceSheet(String mediaType) {
+    final label = mediaType == 'video' ? 'gait video' : 'wound photo';
+    return showModalBottomSheet<ImageSource>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        decoration: const BoxDecoration(
+          color: Color(0xFFFFFBF6),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+        ),
+        padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            Text('Capture $label', style: Theme.of(ctx).textTheme.titleLarge),
+            const SizedBox(height: 6),
+            Text(
+              'Choose a source for the clinical media.',
+              style: Theme.of(ctx).textTheme.bodyMedium,
+            ),
+            const SizedBox(height: 20),
+            ListTile(
+              leading: const Icon(Icons.camera_alt_outlined),
+              title: const Text('Camera'),
+              subtitle: const Text('Use device camera to capture live'),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              tileColor: Colors.white.withValues(alpha: 0.72),
+              onTap: () => Navigator.of(ctx).pop(ImageSource.camera),
+            ),
+            const SizedBox(height: 10),
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: const Text('Photo library'),
+              subtitle: const Text('Pick existing media from device gallery'),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              tileColor: Colors.white.withValues(alpha: 0.72),
+              onTap: () => Navigator.of(ctx).pop(ImageSource.gallery),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _generatePatientAfterVisitSummary() async {
+    final caseRecord = _caseRecord;
+    if (caseRecord == null) return;
+
+    setState(() {
+      _generatingPatientAvs = true;
+      _error = null;
+    });
+    try {
+      final postVisit = await _api.orchestratorPostVisit(caseRecord.caseId);
+      final patientPayload = postVisit.outputs['patient'];
+      if (patientPayload is! Map) {
+        throw Exception('Orchestrator post-visit did not return patient summary output.');
+      }
+      final avs = PatientAfterVisitSummary.fromJson(Map<String, dynamic>.from(patientPayload));
+      if (!mounted) return;
+      setState(() {
+        _latestPatientAvs = avs;
+        final billingPayload = postVisit.outputs['billing'];
+        if (billingPayload is Map) {
+          _latestBillingResponse = AgentRunResponse(
+            agentId: 'billing_optimizer_agent',
+            agentName: 'Billing Optimizer Agent',
+            result: Map<String, dynamic>.from(billingPayload),
+          );
+        }
+        _generatingPatientAvs = false;
+      });
+      _openWorkspace(WorkspaceView.noteStudio);
+      _showMessage('Post-visit orchestrator generated patient summary.');
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _generatingPatientAvs = false;
         _error = '$error';
       });
     }
@@ -679,7 +885,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     });
 
     try {
-      final payload = await _api.fetchPatientHistoryDebug(
+      final payload = await _api.fetchOrchestratorPreVisit(
         patientId: _patientIdForCase(caseRecord),
         currentComplaint: complaint,
         topK: 5,
@@ -704,12 +910,41 @@ class _DashboardScreenState extends State<DashboardScreen> {
     await _loadHistoryCitations(caseRecord);
   }
 
+  Future<void> _loadOfflineReadiness({bool prepull = false}) async {
+    setState(() {
+      _loadingOfflineReadiness = true;
+    });
+    try {
+      final status = await _api.fetchOfflineReadiness(prepull: prepull);
+      if (!mounted) return;
+      setState(() {
+        _offlineReadiness = status;
+        _loadingOfflineReadiness = false;
+      });
+      if (prepull) {
+        _showMessage(status.ready ? 'Offline readiness checks passed.' : 'Offline readiness still has failing checks.');
+      }
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _loadingOfflineReadiness = false;
+        _error = '$error';
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final caseRecord = _caseRecord;
     final isMobile = MediaQuery.sizeOf(context).width < 720;
 
     return Scaffold(
+      floatingActionButton: FloatingActionButton(
+        onPressed: _showVoiceAssistantSheet,
+        backgroundColor: const Color(0xFF4A6D8C),
+        tooltip: 'Voice Assistant',
+        child: const Icon(Icons.mic, color: Colors.white),
+      ),
       bottomNavigationBar: _loading || caseRecord == null || !isMobile
           ? null
           : _MobileBottomNav(
@@ -760,11 +995,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           const SizedBox(height: 10),
                           _AmbientNudgeToggle(
                             enabled: _ambientNudgesEnabled,
+                            sensitivity: _nudgeSensitivity,
                             onChanged: (value) {
                               setState(() {
                                 _ambientNudgesEnabled = value;
                               });
                               _startClinicalNudgeLoop();
+                            },
+                            onSensitivityChanged: (value) {
+                              setState(() {
+                                _nudgeSensitivity = value;
+                                _lastNudgeId = null;
+                              });
                             },
                           ),
                         ],
@@ -810,9 +1052,28 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 needsChangesCases: _countCasesByStatus('needs_changes'),
                 criticalCases: _countCriticalCases(),
                 onRefresh: _load,
+                onTapQueue: () => _openWorkspace(WorkspaceView.overview),
+                onTapPending: () {
+                  setState(() {
+                    _queueFilter = 'pending_review';
+                  });
+                  _openWorkspace(WorkspaceView.overview);
+                },
+                onTapNeedsChanges: () {
+                  setState(() {
+                    _queueFilter = 'needs_changes';
+                  });
+                  _openWorkspace(WorkspaceView.overview);
+                },
+                onTapCritical: () => _openWorkspace(WorkspaceView.overview, focusKey: _flagsKey),
               ),
               const SizedBox(height: 18),
-              _CasePulseRow(caseRecord: caseRecord),
+              _CasePulseRow(
+                caseRecord: caseRecord,
+                onTapStatus: () => _openWorkspace(WorkspaceView.overview, focusKey: _reviewPanelKey),
+                onTapFlags: () => _openWorkspace(WorkspaceView.overview, focusKey: _flagsKey),
+                onTapDifferentials: () => _openWorkspace(WorkspaceView.overview, focusKey: _flagsKey),
+              ),
               const SizedBox(height: 16),
               if (!isMobile) ...[
                 _QueueRail(
@@ -872,6 +1133,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
               const SizedBox(height: 16),
               _Panel(
+                title: 'Sovereign readiness',
+                subtitle: 'Quick admin checks for model cache, local LLM reachability, and database mode.',
+                accent: const Color(0xFF2B4158),
+                child: _OfflineReadinessTile(
+                  status: _offlineReadiness,
+                  loading: _loadingOfflineReadiness,
+                  onRefresh: () => _loadOfflineReadiness(),
+                  onPrepull: () => _loadOfflineReadiness(prepull: true),
+                ),
+              ),
+              const SizedBox(height: 16),
+              _Panel(
                 title: 'Revenue leakage detector',
                 subtitle: 'Find billable CPT and ICD-10 opportunities missing from summary capture.',
                 accent: const Color(0xFF6E4E2E),
@@ -909,6 +1182,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 onOpenAudit: () => _openWorkspace(WorkspaceView.audit),
                 onRunSafety: _runSafetyAgent,
                 onRunQueue: _runQueueAgent,
+                onNewCase: () => _openWorkspace(WorkspaceView.agents),
               ),
               if (_error != null) ...[
                 const SizedBox(height: 16),
@@ -948,6 +1222,38 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 latest: _latestVisionObjective,
                 onCaptureImage: () => _runVisionAgent('image'),
                 onCaptureVideo: () => _runVisionAgent('video'),
+              ),
+            ),
+            const SizedBox(height: 16),
+            _Panel(
+              title: 'Patient-Facing Plain Language AVS',
+              subtitle: 'Generate a friendly after-visit summary patients can understand quickly.',
+              accent: const Color(0xFF5E4B8A),
+              child: _PatientAvsPanel(
+                running: _generatingPatientAvs,
+                latest: _latestPatientAvs,
+                onGenerate: _generatePatientAfterVisitSummary,
+                onCopy: () async {
+                  final avs = _latestPatientAvs;
+                  if (avs == null) return;
+                  final lines = <String>[
+                    'After-Visit Summary',
+                    '',
+                    'What we found:',
+                    ...avs.whatWeFound.map((item) => '- $item'),
+                    '',
+                    'What you need to do next:',
+                    ...avs.whatYouNeedToDoNext.map((item) => '- $item'),
+                    '',
+                    'When to get help:',
+                    ...avs.whenToGetHelp.map((item) => '- $item'),
+                    '',
+                    avs.disclaimer,
+                  ];
+                  await Clipboard.setData(ClipboardData(text: lines.join('\n')));
+                  if (!mounted) return;
+                  _showMessage('AVS copied to clipboard');
+                },
               ),
             ),
             const SizedBox(height: 16),
@@ -1135,6 +1441,94 @@ class _BillingLeakageCard extends StatelessWidget {
             suggestion: leak['suggestion']?.toString() ?? '',
           ),
           const SizedBox(height: 10),
+        ],
+      ],
+    );
+  }
+}
+
+class _OfflineReadinessTile extends StatelessWidget {
+  const _OfflineReadinessTile({
+    required this.status,
+    required this.loading,
+    required this.onRefresh,
+    required this.onPrepull,
+  });
+
+  final OfflineReadinessStatus? status;
+  final bool loading;
+  final VoidCallback onRefresh;
+  final VoidCallback onPrepull;
+
+  @override
+  Widget build(BuildContext context) {
+    final checks = status?.checks ?? const <OfflineReadinessCheck>[];
+    OfflineReadinessCheck? findCheck(String key) {
+      for (final item in checks) {
+        if (item.name == key) {
+          return item;
+        }
+      }
+      return null;
+    }
+
+    final modelCheck = findCheck('required_models_cached');
+    final llmCheck = findCheck('local_llm_base_url');
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            FilledButton.tonalIcon(
+              onPressed: loading ? null : onRefresh,
+              icon: loading
+                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.sync_outlined),
+              label: const Text('Refresh checks'),
+            ),
+            OutlinedButton.icon(
+              onPressed: loading ? null : onPrepull,
+              icon: const Icon(Icons.download_for_offline_outlined),
+              label: const Text('Pre-pull models'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        if (status == null)
+          Text('No readiness snapshot yet. Run refresh to load checks.', style: Theme.of(context).textTheme.bodyMedium)
+        else ...[
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              _QuickFact(label: 'Overall', value: status!.ready ? 'Ready' : 'Needs action'),
+              _QuickFact(label: 'DB mode', value: status!.databaseMode),
+              _QuickFact(label: 'Model cache', value: modelCheck?.ok == true ? 'Warm' : 'Missing models'),
+              _QuickFact(label: 'Local LLM', value: llmCheck?.ok == true ? 'Reachable config' : 'Check base URL'),
+            ],
+          ),
+          const SizedBox(height: 12),
+          for (final check in checks)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    check.ok ? Icons.check_circle_outline : Icons.error_outline,
+                    color: check.ok ? const Color(0xFF2E7D32) : const Color(0xFFB23A48),
+                    size: 18,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text('${check.name}: ${check.detail}', style: Theme.of(context).textTheme.bodySmall),
+                  ),
+                ],
+              ),
+            ),
         ],
       ],
     );
@@ -1344,6 +1738,10 @@ class _TopHeader extends StatelessWidget {
     required this.needsChangesCases,
     required this.criticalCases,
     required this.onRefresh,
+    this.onTapQueue,
+    this.onTapPending,
+    this.onTapNeedsChanges,
+    this.onTapCritical,
   });
 
   final String patientLabel;
@@ -1355,6 +1753,10 @@ class _TopHeader extends StatelessWidget {
   final int needsChangesCases;
   final int criticalCases;
   final Future<void> Function() onRefresh;
+  final VoidCallback? onTapQueue;
+  final VoidCallback? onTapPending;
+  final VoidCallback? onTapNeedsChanges;
+  final VoidCallback? onTapCritical;
 
   @override
   Widget build(BuildContext context) {
@@ -1413,20 +1815,20 @@ class _TopHeader extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    Expanded(child: _MetricTile(label: 'Queue', value: '$totalCases', tone: const Color(0xFFFFE7C6))),
+                    Expanded(child: _MetricTile(label: 'Queue', value: '$totalCases', tone: const Color(0xFFFFE7C6), onTap: onTapQueue)),
                     const SizedBox(width: 12),
-                    Expanded(child: _MetricTile(label: 'Pending', value: '$pendingCases', tone: const Color(0xFFD6F5EB))),
+                    Expanded(child: _MetricTile(label: 'Pending', value: '$pendingCases', tone: const Color(0xFFD6F5EB), onTap: onTapPending)),
                   ],
                 ),
                 const SizedBox(height: 12),
                 Row(
                   children: [
                     Expanded(
-                      child: _MetricTile(label: 'Needs changes', value: '$needsChangesCases', tone: const Color(0xFFFFE1D6)),
+                      child: _MetricTile(label: 'Needs changes', value: '$needsChangesCases', tone: const Color(0xFFFFE1D6), onTap: onTapNeedsChanges),
                     ),
                     const SizedBox(width: 12),
                     Expanded(
-                      child: _MetricTile(label: 'Critical flags', value: '$criticalCases', tone: const Color(0xFFFFD7D1)),
+                      child: _MetricTile(label: 'Critical flags', value: '$criticalCases', tone: const Color(0xFFFFD7D1), onTap: onTapCritical),
                     ),
                   ],
                 ),
@@ -1664,10 +2066,17 @@ class _WorkspaceBanner extends StatelessWidget {
 }
 
 class _AmbientNudgeToggle extends StatelessWidget {
-  const _AmbientNudgeToggle({required this.enabled, required this.onChanged});
+  const _AmbientNudgeToggle({
+    required this.enabled,
+    required this.sensitivity,
+    required this.onChanged,
+    required this.onSensitivityChanged,
+  });
 
   final bool enabled;
+  final String sensitivity;
   final ValueChanged<bool> onChanged;
+  final ValueChanged<String> onSensitivityChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -1683,10 +2092,35 @@ class _AmbientNudgeToggle extends StatelessWidget {
         children: [
           const Icon(Icons.notifications_active_outlined, size: 18),
           const SizedBox(width: 10),
-          const Expanded(
-            child: Text(
-              'Ambient clinical nudges (session)',
-              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Ambient clinical nudges (session)',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 6),
+                DropdownButtonHideUnderline(
+                  child: DropdownButton<String>(
+                    value: sensitivity,
+                    borderRadius: BorderRadius.circular(12),
+                    isDense: true,
+                    onChanged: enabled
+                        ? (value) {
+                            if (value != null) {
+                              onSensitivityChanged(value);
+                            }
+                          }
+                        : null,
+                    items: const [
+                      DropdownMenuItem(value: 'low', child: Text('Sensitivity: Low')),
+                      DropdownMenuItem(value: 'medium', child: Text('Sensitivity: Medium')),
+                      DropdownMenuItem(value: 'high', child: Text('Sensitivity: High')),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ),
           Switch.adaptive(value: enabled, onChanged: onChanged),
@@ -1752,6 +2186,96 @@ class _VisionAssistPanel extends StatelessWidget {
               ],
             ),
           ),
+      ],
+    );
+  }
+}
+
+class _PatientAvsPanel extends StatelessWidget {
+  const _PatientAvsPanel({
+    required this.running,
+    required this.latest,
+    required this.onGenerate,
+    required this.onCopy,
+  });
+
+  final bool running;
+  final PatientAfterVisitSummary? latest;
+  final VoidCallback onGenerate;
+  final VoidCallback onCopy;
+
+  Widget _section(BuildContext context, String title, List<String> bullets) {
+    if (bullets.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title, style: Theme.of(context).textTheme.titleSmall),
+        const SizedBox(height: 6),
+        for (final line in bullets)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Text('• $line', style: Theme.of(context).textTheme.bodyMedium),
+          ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            FilledButton.tonalIcon(
+              onPressed: running ? null : onGenerate,
+              icon: running
+                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.record_voice_over_outlined),
+              label: Text(running ? 'Generating...' : 'Generate patient AVS'),
+            ),
+            OutlinedButton.icon(
+              onPressed: latest == null ? null : onCopy,
+              icon: const Icon(Icons.copy_all_outlined),
+              label: const Text('Copy AVS'),
+            ),
+          ],
+        ),
+        if (latest != null) ...[
+          const SizedBox(height: 12),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF8F6FF),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: const Color(0xFFD9D0F2)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'After-Visit Summary (${latest!.readingLevel})',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 10),
+                _section(context, 'What we found', latest!.whatWeFound),
+                const SizedBox(height: 10),
+                _section(context, 'What you need to do next', latest!.whatYouNeedToDoNext),
+                const SizedBox(height: 10),
+                _section(context, 'When to get help', latest!.whenToGetHelp),
+                if (latest!.disclaimer.trim().isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Text(latest!.disclaimer, style: Theme.of(context).textTheme.bodySmall),
+                ],
+              ],
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -1907,6 +2431,7 @@ class _SideRail extends StatelessWidget {
     required this.onOpenAudit,
     required this.onRunSafety,
     required this.onRunQueue,
+    required this.onNewCase,
   });
 
   final GlobalKey reviewPanelKey;
@@ -1924,6 +2449,7 @@ class _SideRail extends StatelessWidget {
   final VoidCallback onOpenAudit;
   final VoidCallback onRunSafety;
   final VoidCallback onRunQueue;
+  final VoidCallback onNewCase;
 
   @override
   Widget build(BuildContext context) {
@@ -2031,6 +2557,7 @@ class _SideRail extends StatelessWidget {
               _ActionButton(label: 'Jump to flags', icon: Icons.warning_amber_rounded, onTap: onOpenFlags),
               _ActionButton(label: 'Edit note', icon: Icons.edit_note, onTap: onOpenEditor),
               _ActionButton(label: 'View audit trail', icon: Icons.timeline, onTap: onOpenAudit),
+              _ActionButton(label: 'New intake case', icon: Icons.person_add_outlined, onTap: onNewCase),
               _ActionButton(
                 label: runningAgent ? 'Running safety agent...' : 'Run safety reviewer',
                 icon: Icons.verified_user_outlined,
@@ -2050,9 +2577,17 @@ class _SideRail extends StatelessWidget {
 }
 
 class _CasePulseRow extends StatelessWidget {
-  const _CasePulseRow({required this.caseRecord});
+  const _CasePulseRow({
+    required this.caseRecord,
+    this.onTapStatus,
+    this.onTapFlags,
+    this.onTapDifferentials,
+  });
 
   final CaseRecord caseRecord;
+  final VoidCallback? onTapStatus;
+  final VoidCallback? onTapFlags;
+  final VoidCallback? onTapDifferentials;
 
   @override
   Widget build(BuildContext context) {
@@ -2064,16 +2599,19 @@ class _CasePulseRow extends StatelessWidget {
           label: 'Summary status',
           value: caseRecord.reviewStatus.replaceAll('_', ' '),
           accent: const Color(0xFF244553),
+          onTap: onTapStatus,
         ),
         _PulseCard(
           label: 'Flags',
           value: '${caseRecord.note.reviewFlags.length}',
           accent: const Color(0xFFC96F4A),
+          onTap: onTapFlags,
         ),
         _PulseCard(
           label: 'Differentials',
           value: '${caseRecord.note.differentialDiagnosis.length}',
           accent: const Color(0xFF1D6A72),
+          onTap: onTapDifferentials,
         ),
         _PulseCard(
           label: 'Latest note update',
@@ -2468,11 +3006,17 @@ class _IntakeAgentResult extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final result = response.result;
-    final caseId = result['case_id'] as String? ?? '';
-    final entities = ClinicalEntities.fromJson(Map<String, dynamic>.from(result['entities'] as Map));
-    final reviewFlags = (result['review_flags'] as List<dynamic>)
-        .map((item) => ReviewFlag.fromJson(Map<String, dynamic>.from(item as Map)))
-        .toList();
+    final caseId = result['case_id']?.toString() ?? '';
+    final entities = ClinicalEntities.fromJson(
+      result['entities'] is Map ? Map<String, dynamic>.from(result['entities'] as Map) : const {},
+    );
+    final rawReviewFlags = result['review_flags'];
+    final reviewFlags = rawReviewFlags is List
+        ? rawReviewFlags
+            .whereType<Map>()
+            .map((item) => ReviewFlag.fromJson(Map<String, dynamic>.from(item)))
+            .toList()
+        : const <ReviewFlag>[];
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -2486,7 +3030,7 @@ class _IntakeAgentResult extends StatelessWidget {
         children: [
           Row(
             children: [
-              Expanded(child: Text(result['patient_label'] as String? ?? 'Generated case')),
+              Expanded(child: Text(result['patient_label']?.toString() ?? 'Generated case')),
               FilledButton.tonal(
                 onPressed: caseId.isEmpty ? null : () => onOpenCase(caseId),
                 child: const Text('Open case'),
@@ -2494,7 +3038,7 @@ class _IntakeAgentResult extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 10),
-          Text(result['summary'] as String? ?? ''),
+          Text(result['summary']?.toString() ?? ''),
           const SizedBox(height: 14),
           Wrap(
             spacing: 10,
@@ -2503,7 +3047,7 @@ class _IntakeAgentResult extends StatelessWidget {
               _QuickFact(label: 'Symptoms', value: '${entities.symptoms.length}'),
               _QuickFact(label: 'Allergies', value: '${entities.allergies.length}'),
               _QuickFact(label: 'Flags', value: '${reviewFlags.length}'),
-              _QuickFact(label: 'Status', value: result['review_status'] as String? ?? 'unknown'),
+              _QuickFact(label: 'Status', value: result['review_status']?.toString() ?? 'unknown'),
             ],
           ),
         ],
@@ -2521,9 +3065,13 @@ class _SafetyAgentResult extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final result = response.result;
-    final issues = (result['issues'] as List<dynamic>)
-        .map((item) => SafetyIssue.fromJson(Map<String, dynamic>.from(item as Map)))
-        .toList();
+    final rawIssues = result['issues'];
+    final issues = rawIssues is List
+        ? rawIssues
+            .whereType<Map>()
+            .map((item) => SafetyIssue.fromJson(Map<String, dynamic>.from(item)))
+            .toList()
+        : const <SafetyIssue>[];
 
     return Column(
       children: issues
@@ -2555,14 +3103,18 @@ class _QueueAgentResult extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final result = response.result;
-    final rankedCases = (result['ranked_cases'] as List<dynamic>)
-        .map((item) => QueueRankedCase.fromJson(Map<String, dynamic>.from(item as Map)))
-        .toList();
+    final rawRankedCases = result['ranked_cases'];
+    final rankedCases = rawRankedCases is List
+        ? rawRankedCases
+            .whereType<Map>()
+            .map((item) => QueueRankedCase.fromJson(Map<String, dynamic>.from(item)))
+            .toList()
+        : const <QueueRankedCase>[];
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Queue size: ${result['queue_size']}'),
+        Text('Queue size: ${result['queue_size']?.toString() ?? '0'}'),
         const SizedBox(height: 12),
         ...rankedCases.map(
           (item) => Padding(
@@ -2705,57 +3257,75 @@ class _Panel extends StatelessWidget {
 }
 
 class _MetricTile extends StatelessWidget {
-  const _MetricTile({required this.label, required this.value, required this.tone});
+  const _MetricTile({required this.label, required this.value, required this.tone, this.onTap});
 
   final String label;
   final String value;
   final Color tone;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: tone.withValues(alpha: 0.18),
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white24),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(label, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.white70)),
-          const SizedBox(height: 8),
-          Text(value, style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: Colors.white)),
-        ],
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: tone.withValues(alpha: 0.18),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.white24),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(label, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.white70)),
+              const SizedBox(height: 8),
+              Text(value, style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: Colors.white)),
+              if (onTap != null) ...[const SizedBox(height: 4), Text('Tap to filter', style: Theme.of(context).textTheme.labelSmall?.copyWith(color: Colors.white38))],
+            ],
+          ),
+        ),
       ),
     );
   }
 }
 
 class _PulseCard extends StatelessWidget {
-  const _PulseCard({required this.label, required this.value, required this.accent});
+  const _PulseCard({required this.label, required this.value, required this.accent, this.onTap});
 
   final String label;
   final String value;
   final Color accent;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 210,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.74),
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: accent.withValues(alpha: 0.22)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(label, style: Theme.of(context).textTheme.bodyMedium),
-          const SizedBox(height: 8),
-          Text(value, style: Theme.of(context).textTheme.titleLarge?.copyWith(color: accent)),
-        ],
+        onTap: onTap,
+        child: Container(
+          width: 210,
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.74),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: accent.withValues(alpha: onTap != null ? 0.44 : 0.22)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(label, style: Theme.of(context).textTheme.bodyMedium),
+              const SizedBox(height: 8),
+              Text(value, style: Theme.of(context).textTheme.titleLarge?.copyWith(color: accent)),
+              if (onTap != null) ...[const SizedBox(height: 4), Text('Tap to view', style: Theme.of(context).textTheme.labelSmall?.copyWith(color: Colors.black38))],
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -3028,4 +3598,318 @@ String _formatDateTime(DateTime value) {
   final hour = local.hour.toString().padLeft(2, '0');
   final minute = local.minute.toString().padLeft(2, '0');
   return '${local.year}-$month-$day $hour:$minute';
+}
+
+// ── Voice Assistant Sheet ─────────────────────────────────────────────────────
+
+class _VoiceAssistantSheet extends StatefulWidget {
+  const _VoiceAssistantSheet({
+    required this.api,
+    required this.caseId,
+    required this.speech,
+    required this.tts,
+    required this.speechAvailable,
+    required this.onActionCode,
+  });
+
+  final ClinicApiClient api;
+  final String caseId;
+  final SpeechToText speech;
+  final FlutterTts tts;
+  final bool speechAvailable;
+  final void Function(String actionCode) onActionCode;
+
+  @override
+  State<_VoiceAssistantSheet> createState() => _VoiceAssistantSheetState();
+}
+
+class _VoiceAssistantSheetState extends State<_VoiceAssistantSheet>
+    with SingleTickerProviderStateMixin {
+  bool _listening = false;
+  bool _processing = false;
+  String _transcript = '';
+  VoiceCommandResponse? _result;
+  String? _error;
+
+  late final AnimationController _pulseController;
+  late final Animation<double> _pulseAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat(reverse: true);
+    _pulseAnim = Tween<double>(begin: 1.0, end: 1.18).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _pulseController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _startListening() async {
+    if (!widget.speechAvailable) {
+      setState(() => _error = 'Microphone not available on this device.');
+      return;
+    }
+    setState(() {
+      _listening = true;
+      _transcript = '';
+      _result = null;
+      _error = null;
+    });
+    await widget.speech.listen(
+      onResult: (SpeechRecognitionResult result) {
+        setState(() => _transcript = result.recognizedWords);
+        if (result.finalResult) _stopAndProcess();
+      },
+      listenFor: const Duration(seconds: 15),
+      pauseFor: const Duration(seconds: 3),
+      localeId: 'en_US',
+    );
+  }
+
+  Future<void> _stopAndProcess() async {
+    if (!_listening) return;
+    await widget.speech.stop();
+    setState(() {
+      _listening = false;
+      _processing = true;
+    });
+    final text = _transcript.trim();
+    if (text.isEmpty) {
+      setState(() {
+        _processing = false;
+        _error = 'No speech detected. Please try again.';
+      });
+      return;
+    }
+    try {
+      final result = await widget.api.processVoiceCommand(
+        caseId: widget.caseId,
+        text: text,
+      );
+      setState(() {
+        _result = result;
+        _processing = false;
+      });
+      await widget.tts.speak(result.responseText);
+    } catch (e) {
+      setState(() {
+        _processing = false;
+        _error = 'Could not reach the assistant: $e';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const sheetRadius = Radius.circular(24);
+    return SafeArea(
+      child: Container(
+        margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1A2A3A),
+          borderRadius: const BorderRadius.all(sheetRadius),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.4),
+              blurRadius: 32,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 24, 24, 32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.assistant, color: Color(0xFF7EC8E3), size: 22),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Copilot Voice Assistant',
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w600,
+                        ),
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white54, size: 20),
+                    onPressed: () => Navigator.of(context).pop(),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Tap the mic and say a command — approve note, run safety review, navigate to agents, and more.',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.white54),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 28),
+              // Mic button
+              GestureDetector(
+                onTap: _processing ? null : (_listening ? _stopAndProcess : _startListening),
+                child: AnimatedBuilder(
+                  animation: _pulseAnim,
+                  builder: (_, child) {
+                    final scale = _listening ? _pulseAnim.value : 1.0;
+                    return Transform.scale(
+                      scale: scale,
+                      child: child,
+                    );
+                  },
+                  child: Container(
+                    width: 80,
+                    height: 80,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _listening
+                          ? const Color(0xFFE53935)
+                          : _processing
+                              ? Colors.grey.shade700
+                              : const Color(0xFF4A6D8C),
+                      boxShadow: _listening
+                          ? [
+                              BoxShadow(
+                                color: const Color(0xFFE53935).withValues(alpha: 0.5),
+                                blurRadius: 24,
+                                spreadRadius: 4,
+                              )
+                            ]
+                          : [],
+                    ),
+                    child: Icon(
+                      _listening ? Icons.stop : (_processing ? Icons.hourglass_top : Icons.mic),
+                      color: Colors.white,
+                      size: 36,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              // Status / transcript
+              if (_listening)
+                Text(
+                  _transcript.isEmpty ? 'Listening…' : '"$_transcript"',
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: Colors.white70,
+                        fontStyle: FontStyle.italic,
+                      ),
+                  textAlign: TextAlign.center,
+                )
+              else if (_processing)
+                const CircularProgressIndicator(color: Color(0xFF7EC8E3))
+              else if (_error != null)
+                Text(
+                  _error!,
+                  style: const TextStyle(color: Color(0xFFFF6B6B)),
+                  textAlign: TextAlign.center,
+                )
+              else if (_result != null)
+                _ResponseCard(result: _result!, onAction: widget.onActionCode)
+              else
+                const Text(
+                  'Ready',
+                  style: TextStyle(color: Colors.white38),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ResponseCard extends StatelessWidget {
+  const _ResponseCard({required this.result, required this.onAction});
+
+  final VoiceCommandResponse result;
+  final void Function(String) onAction;
+
+  static const _intentLabels = <String, String>{
+    'approve_note': 'Approve Note',
+    'request_changes': 'Request Changes',
+    'run_safety_review': 'Safety Review',
+    'run_billing': 'Billing Optimizer',
+    'get_case_summary': 'Case Summary',
+    'get_symptoms': 'Symptoms',
+    'dictate_soap': 'Dictate SOAP',
+    'get_medical_info': 'Medical Info',
+    'navigate_agents': 'Navigate → Agents',
+    'navigate_audit': 'Navigate → Audit',
+    'navigate_note_studio': 'Navigate → Note Studio',
+    'unknown': 'Unknown',
+  };
+
+  static const _actionLabels = <String, String>{
+    'approve_note': 'Approve Now',
+    'request_changes': 'Flag Changes',
+    'navigate_agents': 'Go to Agents',
+    'navigate_audit': 'Go to Audit',
+    'navigate_note_studio': 'Go to Note Studio',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final intentLabel = _intentLabels[result.intent] ?? result.intent;
+    final actionLabel = _actionLabels[result.actionCode];
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white10,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF4A6D8C),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  intentLabel,
+                  style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            result.responseText,
+            style: const TextStyle(color: Colors.white, fontSize: 15),
+          ),
+          if (actionLabel != null) ...[
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: () => onAction(result.actionCode),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF4A6D8C),
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+                child: Text(actionLabel),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 }

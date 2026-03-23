@@ -383,6 +383,36 @@ class LLMClient:
                 "confidence": "low",
             }
 
+    def generate_patient_after_visit_summary(self, soap_note: SoapNote) -> dict[str, Any]:
+        if not self._gateway_enabled:
+            return _fallback_patient_after_visit_summary(soap_note)
+
+        prompt = (
+            "You are PatientCommunicatorAgent. Convert this clinician SOAP note into patient-friendly "
+            "English at a 5th-grade reading level. Return valid JSON only with keys: "
+            '{"what_we_found":[],"what_you_need_to_do_next":[],"when_to_get_help":[]}. '
+            "Use short bullet-style sentences. Do not include diagnosis certainty unless clearly stated.\n\n"
+            f"Subjective:\n{soap_note.subjective.text}\n\n"
+            f"Objective:\n{soap_note.objective.text}\n\n"
+            f"Assessment:\n{soap_note.assessment.text}\n\n"
+            f"Plan:\n{soap_note.plan.text}\n"
+        )
+
+        try:
+            payload = self._call_json(prompt, priority="Standard")
+            found = _normalize_plain_list(payload.get("what_we_found"))
+            next_steps = _normalize_plain_list(payload.get("what_you_need_to_do_next"))
+            help_when = _normalize_plain_list(payload.get("when_to_get_help"))
+            if not found and not next_steps:
+                return _fallback_patient_after_visit_summary(soap_note)
+            return {
+                "what_we_found": found,
+                "what_you_need_to_do_next": next_steps,
+                "when_to_get_help": help_when,
+            }
+        except Exception:
+            return _fallback_patient_after_visit_summary(soap_note)
+
 
 def _infer_media_mime(path: Path, media_type: str) -> str:
     suffix = path.suffix.lower()
@@ -412,3 +442,38 @@ def _fallback_visual_objective(media_type: str) -> str:
         "Skin image reviewed. Visible lesion with erythematous surface changes and localized border irregularity. "
         "No definitive diagnosis assigned from image alone."
     )
+
+
+def _normalize_plain_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        lines = [item.strip(" -\t") for item in re.split(r"[\n;]+", value) if item.strip()]
+        return [item for item in lines if item]
+    return []
+
+
+def _fallback_patient_after_visit_summary(soap_note: SoapNote) -> dict[str, Any]:
+    found = []
+    next_steps = []
+
+    if soap_note.assessment.text.strip() and soap_note.assessment.text.strip().lower() != "unknown":
+        found.append(f"Your doctor is watching for: {soap_note.assessment.text.strip()}")
+    if soap_note.objective.text.strip() and soap_note.objective.text.strip().lower() != "unknown":
+        found.append(f"Exam notes: {soap_note.objective.text.strip()}")
+    if not found:
+        found.append("Your doctor reviewed your symptoms and exam today.")
+
+    if soap_note.plan.text.strip() and soap_note.plan.text.strip().lower() != "unknown":
+        next_steps.extend(_normalize_plain_list(soap_note.plan.text))
+    if not next_steps:
+        next_steps.append("Follow your doctor instructions and take medicines as prescribed.")
+
+    return {
+        "what_we_found": found[:4],
+        "what_you_need_to_do_next": next_steps[:6],
+        "when_to_get_help": [
+            "Get help right away if pain, breathing trouble, or fever gets worse.",
+            "Call the clinic if you are not improving or you have new symptoms.",
+        ],
+    }

@@ -1018,14 +1018,23 @@ class ObserverAgent:
     def __init__(self) -> None:
         self._model = settings.llm_standard_model or settings.openai_model or settings.ollama_model
 
-    def evaluate_transcript(self, transcript: str, elapsed_seconds: int) -> dict[str, Any] | None:
-        if elapsed_seconds < 120:
+    def evaluate_transcript(
+        self,
+        transcript: str,
+        elapsed_seconds: int,
+        sensitivity: str = "medium",
+    ) -> dict[str, Any] | None:
+        normalized_sensitivity = sensitivity.strip().lower()
+        if normalized_sensitivity not in {"low", "medium", "high"}:
+            normalized_sensitivity = "medium"
+
+        if elapsed_seconds < self._minimum_elapsed_seconds(normalized_sensitivity):
             return None
 
         lowered = transcript.lower()
-        if not self._mentions_chest_pain(lowered):
+        if not self._mentions_chest_pain(lowered, sensitivity=normalized_sensitivity):
             return None
-        if self._doctor_asked_follow_up(lowered):
+        if self._doctor_asked_follow_up(lowered, sensitivity=normalized_sensitivity):
             return None
 
         llm_confirmed = self._llm_confirm_nudge(transcript)
@@ -1046,13 +1055,24 @@ class ObserverAgent:
             "trigger": "missed_chest_pain_follow_up",
             "elapsed_seconds": elapsed_seconds,
             "toast_color": "red",
+            "sensitivity": normalized_sensitivity,
         }
 
-    def _mentions_chest_pain(self, lowered_transcript: str) -> bool:
-        patterns = ("chest pain", "chest tightness", "chest pressure")
+    def _minimum_elapsed_seconds(self, sensitivity: str) -> int:
+        if sensitivity == "high":
+            return 60
+        if sensitivity == "low":
+            return 240
+        return 120
+
+    def _mentions_chest_pain(self, lowered_transcript: str, sensitivity: str) -> bool:
+        if sensitivity == "high":
+            patterns = ("chest pain", "chest tightness", "chest pressure", "chest discomfort")
+        else:
+            patterns = ("chest pain", "chest tightness", "chest pressure")
         return any(pattern in lowered_transcript for pattern in patterns)
 
-    def _doctor_asked_follow_up(self, lowered_transcript: str) -> bool:
+    def _doctor_asked_follow_up(self, lowered_transcript: str, sensitivity: str) -> bool:
         doctor_lines = []
         for line in lowered_transcript.splitlines():
             cleaned = line.strip()
@@ -1060,15 +1080,14 @@ class ObserverAgent:
                 doctor_lines.append(cleaned)
         doctor_text = " ".join(doctor_lines) if doctor_lines else lowered_transcript
 
-        follow_up_terms = (
-            "shortness of breath",
-            "breathless",
-            "difficulty breathing",
-            "left arm pain",
-            "pain in your arm",
-            "radiate to your arm",
-        )
-        return any(term in doctor_text for term in follow_up_terms)
+        breathing_terms = ("shortness of breath", "breathless", "difficulty breathing")
+        arm_terms = ("left arm pain", "pain in your arm", "radiate to your arm")
+        asked_breathing = any(term in doctor_text for term in breathing_terms)
+        asked_arm = any(term in doctor_text for term in arm_terms)
+
+        if sensitivity == "high":
+            return asked_breathing and asked_arm
+        return asked_breathing or asked_arm
 
     def _llm_confirm_nudge(self, transcript: str) -> bool | None:
         # Fast local LLM confirmation layer; falls back to deterministic rule if unavailable.
@@ -1358,6 +1377,36 @@ class AgentRuntime:
             **result,
         }
 
+    def run_patient_communicator(self, request: AgentRunRequest) -> dict[str, Any]:
+        case = self._resolve_case(request)
+        run_id = uuid4().hex[:12]
+        agent_id = "patient_communicator_agent"
+        agent_name = "Patient Communicator Agent"
+        self._audit_store.log_event(
+            run_id,
+            case.case_id,
+            agent_id,
+            agent_name,
+            "agent_started",
+            {"step": "patient_plain_language_avs"},
+        )
+
+        result = self._service.generate_patient_after_visit_summary(case.case_id)
+
+        self._audit_store.log_event(
+            run_id,
+            case.case_id,
+            agent_id,
+            agent_name,
+            "agent_completed",
+            {
+                "step": "patient_plain_language_avs",
+                "what_we_found_count": len(result.get("what_we_found", [])),
+                "next_steps_count": len(result.get("what_you_need_to_do_next", [])),
+            },
+        )
+        return result
+
     def list_audit_events(
         self,
         *,
@@ -1420,6 +1469,12 @@ class ProjectAgentRunner:
                 agent_id=agent_id,
                 agent_name=metadata["name"],
                 result=self._runtime.run_billing_optimizer(request),
+            )
+        if agent_id == "patient_communicator_agent":
+            return AgentRunResponse(
+                agent_id=agent_id,
+                agent_name=metadata["name"],
+                result=self._runtime.run_patient_communicator(request),
             )
 
         raise KeyError(agent_id)

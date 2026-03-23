@@ -6,6 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from clinic_copilot.agent_runtime import ObserverAgent, ProjectAgentRegistry, ProjectAgentRunner
 from clinic_copilot.llm import LLMClient
+from clinic_copilot.logging_safety import install_phi_redaction_filter
+from clinic_copilot.offline_readiness import evaluate_offline_readiness
+from clinic_copilot.orchestrator import ClinicalOrchestrator
 from clinic_copilot.regulatory_vault import RegulatoryVaultMiddleware
 from clinic_copilot.schemas import (
     AgentRunRequest,
@@ -21,10 +24,19 @@ from clinic_copilot.schemas import (
     ConversationCaptureResult,
     LongitudinalScribeRequest,
     NoteAmendmentRequest,
+    OfflineReadinessResponse,
+    OrchestratorDuringVisitRequest,
+    OrchestratorDuringVisitResponse,
+    OrchestratorPostVisitResponse,
+    OrchestratorPreVisitRequest,
+    OrchestratorPreVisitResponse,
     PatientHistoryDebugRequest,
     PatientHistoryDebugResponse,
+    PatientAfterVisitSummaryResponse,
     ReviewDecisionRequest,
     VisionObjectiveResponse,
+    VoiceCommandRequest,
+    VoiceCommandResponse,
 )
 from clinic_copilot.service import ClinicalDocumentationService
 from clinic_copilot.storage import ClinicRepository
@@ -44,10 +56,12 @@ service = ClinicalDocumentationService(LLMClient(), repository)
 agent_registry = ProjectAgentRegistry(Path(__file__).resolve().parents[2] / "agents")
 agent_runner = ProjectAgentRunner(agent_registry, service)
 observer_agent = ObserverAgent()
+orchestrator = ClinicalOrchestrator(service=service, agent_runner=agent_runner, observer_agent=observer_agent)
 
 
 @app.on_event("startup")
 def startup_seed() -> None:
+    install_phi_redaction_filter()
     service.seed_demo_case()
 
 
@@ -152,6 +166,57 @@ def retrieve_patient_history(request: PatientHistoryDebugRequest) -> PatientHist
         raise HTTPException(status_code=502, detail=f"Patient history retrieval failed: {exc}") from exc
 
 
+@app.post("/v1/orchestrator/pre-visit", response_model=OrchestratorPreVisitResponse)
+def orchestrator_pre_visit(request: OrchestratorPreVisitRequest) -> OrchestratorPreVisitResponse:
+    try:
+        payload = orchestrator.pre_visit_briefing(
+            patient_id=request.patient_id,
+            current_complaint=request.current_complaint,
+            top_k=request.top_k,
+        )
+        return OrchestratorPreVisitResponse.model_validate(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Pre-visit orchestration failed: {exc}") from exc
+
+
+@app.post("/v1/orchestrator/during-visit", response_model=OrchestratorDuringVisitResponse)
+def orchestrator_during_visit(request: OrchestratorDuringVisitRequest) -> OrchestratorDuringVisitResponse:
+    try:
+        payload = orchestrator.during_visit_update(
+            case_id=request.case_id,
+            transcript_chunk=request.transcript_chunk,
+            sensitivity=request.sensitivity,
+        )
+        return OrchestratorDuringVisitResponse.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"During-visit orchestration failed: {exc}") from exc
+
+
+@app.post("/v1/orchestrator/post-visit/{case_id}", response_model=OrchestratorPostVisitResponse)
+def orchestrator_post_visit(case_id: str) -> OrchestratorPostVisitResponse:
+    try:
+        payload = orchestrator.post_visit_finalize(case_id=case_id)
+        return OrchestratorPostVisitResponse.model_validate(payload)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Case not found") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Post-visit orchestration failed: {exc}") from exc
+
+
+@app.get("/v1/admin/offline-readiness", response_model=OfflineReadinessResponse)
+def admin_offline_readiness(prepull: bool = Query(default=False)) -> OfflineReadinessResponse:
+    try:
+        workspace = Path(__file__).resolve().parents[2]
+        payload = evaluate_offline_readiness(workspace=workspace, prepull=prepull)
+        return OfflineReadinessResponse.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Offline readiness check failed: {exc}") from exc
+
+
 @app.post("/v1/cases/{case_id}/review", response_model=CaseRecord)
 def review_case(case_id: str, review: ReviewDecisionRequest) -> CaseRecord:
     try:
@@ -180,6 +245,17 @@ def capture_conversation(case_id: str, payload: ConversationCaptureRequest) -> C
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Case not found") from exc
     return ConversationCaptureResult(case_id=case_id, captured_count=captured)
+
+
+@app.get("/v1/cases/{case_id}/patient-avs", response_model=PatientAfterVisitSummaryResponse)
+def get_patient_after_visit_summary(case_id: str) -> PatientAfterVisitSummaryResponse:
+    try:
+        payload = service.generate_patient_after_visit_summary(case_id)
+        return PatientAfterVisitSummaryResponse.model_validate(payload)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Case not found") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Patient summary generation failed: {exc}") from exc
 
 
 @app.get("/v1/cases/{case_id}/conversation-capture", response_model=list[ConversationCaptureEntry])
@@ -229,12 +305,17 @@ async def websocket_clinical_nudges(websocket: WebSocket) -> None:
             transcript = str(payload.get("transcript", "")).strip()
             elapsed_seconds = int(payload.get("elapsed_seconds", 0))
             case_id = str(payload.get("case_id", "unknown"))
+            sensitivity = str(payload.get("sensitivity", "medium"))
 
             if not transcript:
                 await websocket.send_json({"type": "ack", "status": "ignored", "reason": "empty_transcript"})
                 continue
 
-            nudge = observer_agent.evaluate_transcript(transcript=transcript, elapsed_seconds=elapsed_seconds)
+            nudge = observer_agent.evaluate_transcript(
+                transcript=transcript,
+                elapsed_seconds=elapsed_seconds,
+                sensitivity=sensitivity,
+            )
             if nudge is None:
                 await websocket.send_json({"type": "ack", "status": "ok", "case_id": case_id})
                 continue
@@ -248,3 +329,137 @@ async def websocket_clinical_nudges(websocket: WebSocket) -> None:
             await websocket.send_json({"type": "clinical_nudge", "case_id": case_id, "payload": nudge})
     except WebSocketDisconnect:
         return
+
+
+# ── Voice Assistant ──────────────────────────────────────────────────────────
+
+_VOICE_INTENT_OPTIONS = ", ".join([
+    "approve_note",
+    "request_changes",
+    "run_safety_review",
+    "run_billing",
+    "get_case_summary",
+    "get_symptoms",
+    "dictate_soap",
+    "get_medical_info",
+    "navigate_agents",
+    "navigate_audit",
+    "navigate_note_studio",
+    "unknown",
+])
+
+
+def _build_voice_prompt(text: str, case_context: str) -> str:
+    return (
+        "You are a clinical voice assistant helping a doctor. "
+        "Classify the spoken command and craft a concise, helpful response.\n\n"
+        f"Case context:\n{case_context}\n\n"
+        f"Doctor said: \"{text}\"\n\n"
+        "Return a JSON object with exactly these keys:\n"
+        f"- intent: one of [{_VOICE_INTENT_OPTIONS}]\n"
+        "- action_code: one of [none, approve_note, request_changes, navigate_agents, navigate_audit, navigate_note_studio]\n"
+        "- response_text: a single sentence to be spoken back to the clinician\n"
+        "- data: an object with any relevant extracted fields (may be empty)\n\n"
+        "Rules: approve_note/request_changes map to those action_codes; "
+        "navigate_* intents map to their action_code; all others use action_code=none. "
+        "For dictate_soap, parse the dictation into {subjective, objective, assessment, plan} fields in data."
+    )
+
+
+@app.post("/v1/voice-assistant/command", response_model=VoiceCommandResponse)
+def voice_assistant_command(req: VoiceCommandRequest) -> VoiceCommandResponse:
+    # Build case context string
+    case_context = "No specific case loaded."
+    case_data: dict = {}
+    if req.case_id:
+        try:
+            case = service.get_case(req.case_id)
+            note = case.note
+            summary = getattr(note, "summary", "") if note else ""
+            status = case.review_status or "unknown"
+            flags = len(getattr(note, "review_flags", []) or []) if note else 0
+            case_context = (
+                f"Case ID: {case.case_id} | Status: {status} | "
+                f"Patient: {case.patientLabel} | Summary: {summary[:200]} | "
+                f"Review flags: {flags}"
+            )
+            case_data = {"case_id": case.case_id, "review_status": status}
+        except KeyError:
+            case_context = f"Case '{req.case_id}' not found."
+
+    # Call LLM
+    llm_client = LLMClient()
+    try:
+        prompt = _build_voice_prompt(req.text, case_context)
+        result = llm_client._call_json(prompt, priority="Standard")  # noqa: SLF001
+        intent = str(result.get("intent", "unknown"))
+        action_code = str(result.get("action_code", "none"))
+        response_text = str(result.get("response_text", "I didn't catch that. Could you repeat?"))
+        extra_data: dict = dict(result.get("data", {}))
+    except Exception:
+        # Fallback: pattern-match common commands
+        lowered = req.text.lower()
+        if any(w in lowered for w in ("approve", "sign off", "sign the note")):
+            intent, action_code = "approve_note", "approve_note"
+            response_text = "Approving the current note now."
+        elif any(w in lowered for w in ("change", "revision", "amend", "flag")):
+            intent, action_code = "request_changes", "request_changes"
+            response_text = "Flagged the note for changes."
+        elif "safety" in lowered or "review" in lowered:
+            intent, action_code = "run_safety_review", "none"
+            response_text = "Running a safety review on this case."
+        elif "billing" in lowered:
+            intent, action_code = "run_billing", "none"
+            response_text = "Running the billing optimizer."
+        elif "symptom" in lowered:
+            intent, action_code = "get_symptoms", "none"
+            response_text = "Opening the symptoms panel."
+        elif "agent" in lowered:
+            intent, action_code = "navigate_agents", "navigate_agents"
+            response_text = "Navigating to the agents workspace."
+        elif "audit" in lowered or "log" in lowered:
+            intent, action_code = "navigate_audit", "navigate_audit"
+            response_text = "Opening the audit log."
+        elif "note" in lowered or "studio" in lowered:
+            intent, action_code = "navigate_note_studio", "navigate_note_studio"
+            response_text = "Opening Note Studio."
+        else:
+            intent, action_code = "unknown", "none"
+            response_text = "I didn't understand that command. Try saying 'approve note' or 'open Note Studio'."
+        extra_data = {}
+
+    # Validate intent/action_code fall within allowed literal values
+    _valid_intents = {
+        "approve_note", "request_changes", "run_safety_review", "run_billing",
+        "get_case_summary", "get_symptoms", "dictate_soap", "get_medical_info",
+        "navigate_agents", "navigate_audit", "navigate_note_studio", "unknown",
+    }
+    _valid_actions = {"none", "approve_note", "request_changes", "navigate_agents", "navigate_audit", "navigate_note_studio"}
+    if intent not in _valid_intents:
+        intent = "unknown"
+    if action_code not in _valid_actions:
+        action_code = "none"
+
+    # Execute backend side-effects
+    if intent == "approve_note" and req.case_id:
+        try:
+            from clinic_copilot.schemas import ReviewDecisionRequest as _RDR  # noqa: PLC0415
+            service.review_case(req.case_id, _RDR(status="approved", reviewed_by="voice_assistant", clinician_feedback="Approved via voice command."))
+            response_text = "Note approved successfully."
+        except Exception as exc:
+            response_text = f"Could not approve the note: {exc}"
+
+    elif intent == "request_changes" and req.case_id:
+        try:
+            from clinic_copilot.schemas import ReviewDecisionRequest as _RDR  # noqa: PLC0415
+            service.review_case(req.case_id, _RDR(status="needs_changes", reviewed_by="voice_assistant", clinician_feedback="Changes requested via voice command."))
+            response_text = "Note flagged for changes."
+        except Exception as exc:
+            response_text = f"Could not flag for changes: {exc}"
+
+    return VoiceCommandResponse(
+        intent=intent,  # type: ignore[arg-type]
+        response_text=response_text,
+        action_code=action_code,  # type: ignore[arg-type]
+        data={**case_data, **extra_data},
+    )

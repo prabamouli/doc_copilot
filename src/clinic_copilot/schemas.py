@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 
 ConfidenceLevel = Literal["low", "medium", "high"]
+NudgeSensitivity = Literal["low", "medium", "high"]
 ReviewStatus = Literal["pending_review", "approved", "needs_changes"]
 
 
@@ -37,6 +38,18 @@ class VisionObjectiveResponse(BaseModel):
     objective_text: str
     model: str
     confidence: ConfidenceLevel = "medium"
+
+
+class PatientAfterVisitSummaryResponse(BaseModel):
+    case_id: str
+    audience: Literal["patient"] = "patient"
+    reading_level: str = "5th_grade"
+    what_we_found: list[str] = Field(default_factory=list)
+    what_you_need_to_do_next: list[str] = Field(default_factory=list)
+    when_to_get_help: list[str] = Field(default_factory=list)
+    disclaimer: str = (
+        "This summary is for understanding your visit. If symptoms get worse, contact your clinician."
+    )
 
 
 class RetrievedHistoryItem(BaseModel):
@@ -233,3 +246,87 @@ class ConversationCaptureEntry(BaseModel):
 class ConversationCaptureResult(BaseModel):
     case_id: str
     captured_count: int
+
+
+class OrchestratorPreVisitRequest(BaseModel):
+    patient_id: str = Field(min_length=1, max_length=120)
+    current_complaint: str = Field(min_length=3, max_length=4000)
+    top_k: int = Field(default=5, ge=1, le=20)
+
+
+class OrchestratorPreVisitResponse(BaseModel):
+    patient_id: str
+    current_complaint: str
+    briefing: str
+    retrieved: list[RetrievedHistoryItem] = Field(default_factory=list)
+
+
+class OrchestratorDuringVisitRequest(BaseModel):
+    case_id: str = Field(min_length=1, max_length=120)
+    transcript_chunk: str = Field(min_length=1, max_length=5000)
+    sensitivity: NudgeSensitivity = "medium"
+
+
+class OrchestratorDuringVisitResponse(BaseModel):
+    case_id: str
+    buffer_length: int
+    elapsed_seconds: int
+    nudge: dict[str, Any] | None = None
+
+
+class OrchestratorPostVisitResponse(BaseModel):
+    case_id: str
+    sign_allowed: bool
+    pre_sign_validation: dict[str, Any]
+    outputs: dict[str, Any]
+
+
+class OfflineReadinessCheck(BaseModel):
+    name: str
+    ok: bool
+    detail: str
+
+
+class OfflineReadinessResponse(BaseModel):
+    workspace: str
+    requested_models: list[str] = Field(default_factory=list)
+    database_mode: str
+    checks: list[OfflineReadinessCheck] = Field(default_factory=list)
+    ready: bool
+
+
+VoiceCommandIntent = Literal[
+    "approve_note",
+    "request_changes",
+    "run_safety_review",
+    "run_billing",
+    "get_case_summary",
+    "get_symptoms",
+    "dictate_soap",
+    "get_medical_info",
+    "navigate_agents",
+    "navigate_audit",
+    "navigate_note_studio",
+    "unknown",
+]
+
+VoiceActionCode = Literal[
+    "none",
+    "approve_note",
+    "request_changes",
+    "navigate_agents",
+    "navigate_audit",
+    "navigate_note_studio",
+]
+
+
+class VoiceCommandRequest(BaseModel):
+    case_id: str = Field(default="")
+    text: str = Field(min_length=1, max_length=2000, description="Transcribed voice command text.")
+
+
+class VoiceCommandResponse(BaseModel):
+    intent: VoiceCommandIntent
+    response_text: str = Field(description="Human-readable response to be spoken back to the clinician.")
+    action_code: VoiceActionCode = Field(default="none", description="Frontend navigation/action trigger.")
+    data: dict[str, Any] = Field(default_factory=dict)

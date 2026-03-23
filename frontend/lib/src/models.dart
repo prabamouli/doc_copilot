@@ -1,3 +1,22 @@
+Map<String, dynamic> _asMap(Object? value) {
+  if (value is Map<String, dynamic>) return value;
+  if (value is Map) return Map<String, dynamic>.from(value);
+  return const {};
+}
+
+List<Map<String, dynamic>> _asMapList(Object? value) {
+  if (value is! List) return const [];
+  return value.whereType<Map>().map((item) => Map<String, dynamic>.from(item)).toList();
+}
+
+DateTime _parseDateTime(Object? value) {
+  if (value is String) {
+    final parsed = DateTime.tryParse(value);
+    if (parsed != null) return parsed;
+  }
+  return DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+}
+
 class CaseRecord {
   const CaseRecord({
     required this.caseId,
@@ -21,14 +40,14 @@ class CaseRecord {
 
   factory CaseRecord.fromJson(Map<String, dynamic> json) {
     return CaseRecord(
-      caseId: json['case_id'] as String,
-      patientLabel: json['patient_label'] as String,
-      transcript: json['transcript'] as String,
-      reviewStatus: json['review_status'] as String,
-      clinicianFeedback: json['clinician_feedback'] as String? ?? '',
-      createdAt: DateTime.parse(json['created_at'] as String),
-      updatedAt: DateTime.parse(json['updated_at'] as String),
-      note: ClinicalNote.fromJson(json['note'] as Map<String, dynamic>),
+      caseId: json['case_id']?.toString() ?? '',
+      patientLabel: json['patient_label']?.toString() ?? 'Unknown patient',
+      transcript: json['transcript']?.toString() ?? '',
+      reviewStatus: json['review_status']?.toString() ?? 'pending_review',
+      clinicianFeedback: json['clinician_feedback']?.toString() ?? '',
+      createdAt: _parseDateTime(json['created_at']),
+      updatedAt: _parseDateTime(json['updated_at']),
+      note: ClinicalNote.fromJson(_asMap(json['note'])),
     );
   }
 }
@@ -52,16 +71,12 @@ class ClinicalNote {
 
   factory ClinicalNote.fromJson(Map<String, dynamic> json) {
     return ClinicalNote(
-      summary: json['summary'] as String,
-      entities: ClinicalEntities.fromJson(json['entities'] as Map<String, dynamic>),
-      soapNote: SoapNote.fromJson(json['soap_note'] as Map<String, dynamic>),
-      reviewFlags: (json['review_flags'] as List<dynamic>)
-          .map((item) => ReviewFlag.fromJson(item as Map<String, dynamic>))
-          .toList(),
-      differentialDiagnosis: (json['differential_diagnosis'] as List<dynamic>)
-          .map((item) => DifferentialDiagnosisItem.fromJson(item as Map<String, dynamic>))
-          .toList(),
-      disclaimer: json['disclaimer'] as String,
+      summary: json['summary']?.toString() ?? '',
+      entities: ClinicalEntities.fromJson(_asMap(json['entities'])),
+      soapNote: SoapNote.fromJson(_asMap(json['soap_note'])),
+      reviewFlags: _asMapList(json['review_flags']).map(ReviewFlag.fromJson).toList(),
+      differentialDiagnosis: _asMapList(json['differential_diagnosis']).map(DifferentialDiagnosisItem.fromJson).toList(),
+      disclaimer: json['disclaimer']?.toString() ?? 'Clinician review required.',
     );
   }
 }
@@ -87,9 +102,7 @@ class ClinicalEntities {
 
   factory ClinicalEntities.fromJson(Map<String, dynamic> json) {
     List<ExtractedFact> parseList(String key) {
-      return (json[key] as List<dynamic>)
-          .map((item) => ExtractedFact.fromJson(item as Map<String, dynamic>))
-          .toList();
+      return _asMapList(json[key]).map(ExtractedFact.fromJson).toList();
     }
 
     return ClinicalEntities(
@@ -117,9 +130,9 @@ class ExtractedFact {
 
   factory ExtractedFact.fromJson(Map<String, dynamic> json) {
     return ExtractedFact(
-      value: json['value'] as String,
-      status: json['status'] as String,
-      confidence: json['confidence'] as String,
+      value: json['value']?.toString() ?? '',
+      status: json['status']?.toString() ?? 'unknown',
+      confidence: json['confidence']?.toString() ?? 'medium',
     );
   }
 }
@@ -139,10 +152,10 @@ class SoapNote {
 
   factory SoapNote.fromJson(Map<String, dynamic> json) {
     return SoapNote(
-      subjective: SoapSection.fromJson(json['subjective'] as Map<String, dynamic>),
-      objective: SoapSection.fromJson(json['objective'] as Map<String, dynamic>),
-      assessment: SoapSection.fromJson(json['assessment'] as Map<String, dynamic>),
-      plan: SoapSection.fromJson(json['plan'] as Map<String, dynamic>),
+      subjective: SoapSection.fromJson(_asMap(json['subjective'])),
+      objective: SoapSection.fromJson(_asMap(json['objective'])),
+      assessment: SoapSection.fromJson(_asMap(json['assessment'])),
+      plan: SoapSection.fromJson(_asMap(json['plan'])),
     );
   }
 }
@@ -153,7 +166,7 @@ class SoapSection {
   final String text;
 
   factory SoapSection.fromJson(Map<String, dynamic> json) {
-    return SoapSection(text: json['text'] as String);
+    return SoapSection(text: json['text']?.toString() ?? '');
   }
 }
 
@@ -170,9 +183,9 @@ class ReviewFlag {
 
   factory ReviewFlag.fromJson(Map<String, dynamic> json) {
     return ReviewFlag(
-      issue: json['issue'] as String,
-      severity: json['severity'] as String,
-      recommendation: json['recommendation'] as String,
+      issue: json['issue']?.toString() ?? 'Unknown issue',
+      severity: json['severity']?.toString() ?? 'info',
+      recommendation: json['recommendation']?.toString() ?? '',
     );
   }
 }
@@ -190,9 +203,9 @@ class DifferentialDiagnosisItem {
 
   factory DifferentialDiagnosisItem.fromJson(Map<String, dynamic> json) {
     return DifferentialDiagnosisItem(
-      condition: json['condition'] as String,
-      rationale: json['rationale'] as String,
-      confidence: json['confidence'] as String,
+      condition: json['condition']?.toString() ?? 'Unknown condition',
+      rationale: json['rationale']?.toString() ?? '',
+      confidence: json['confidence']?.toString() ?? 'low',
     );
   }
 }
@@ -216,12 +229,12 @@ class AuditLogEntry {
 
   factory AuditLogEntry.fromJson(Map<String, dynamic> json) {
     return AuditLogEntry(
-      id: json['id'] as int,
-      caseId: json['case_id'] as String,
-      eventType: json['event_type'] as String,
-      actor: json['actor'] as String,
-      details: json['details'] as String,
-      createdAt: DateTime.parse(json['created_at'] as String),
+      id: (json['id'] as num?)?.toInt() ?? 0,
+      caseId: json['case_id']?.toString() ?? '',
+      eventType: json['event_type']?.toString() ?? 'unknown',
+      actor: json['actor']?.toString() ?? 'system',
+      details: json['details']?.toString() ?? '',
+      createdAt: _parseDateTime(json['created_at']),
     );
   }
 }
@@ -241,10 +254,10 @@ class AgentSummary {
 
   factory AgentSummary.fromJson(Map<String, dynamic> json) {
     return AgentSummary(
-      id: json['id'] as String,
-      name: json['name'] as String,
-      description: json['description'] as String,
-      version: json['version'] as String,
+      id: json['id']?.toString() ?? '',
+      name: json['name']?.toString() ?? 'Unknown agent',
+      description: json['description']?.toString() ?? '',
+      version: json['version']?.toString() ?? 'unknown',
     );
   }
 }
@@ -262,9 +275,9 @@ class AgentRunResponse {
 
   factory AgentRunResponse.fromJson(Map<String, dynamic> json) {
     return AgentRunResponse(
-      agentId: json['agent_id'] as String,
-      agentName: json['agent_name'] as String,
-      result: Map<String, dynamic>.from(json['result'] as Map),
+      agentId: json['agent_id']?.toString() ?? '',
+      agentName: json['agent_name']?.toString() ?? 'Unknown agent',
+      result: _asMap(json['result']),
     );
   }
 }
@@ -282,9 +295,9 @@ class SafetyIssue {
 
   factory SafetyIssue.fromJson(Map<String, dynamic> json) {
     return SafetyIssue(
-      issue: json['issue'] as String,
-      severity: json['severity'] as String,
-      recommendation: json['recommendation'] as String,
+      issue: json['issue']?.toString() ?? 'Unknown issue',
+      severity: json['severity']?.toString() ?? 'info',
+      recommendation: json['recommendation']?.toString() ?? '',
     );
   }
 }
@@ -306,11 +319,11 @@ class QueueRankedCase {
 
   factory QueueRankedCase.fromJson(Map<String, dynamic> json) {
     return QueueRankedCase(
-      caseId: json['case_id'] as String,
-      patientLabel: json['patient_label'] as String,
-      reviewStatus: json['review_status'] as String,
-      topIssue: json['top_issue'] as String,
-      recommendedAction: json['recommended_action'] as String,
+      caseId: json['case_id']?.toString() ?? '',
+      patientLabel: json['patient_label']?.toString() ?? 'Unknown patient',
+      reviewStatus: json['review_status']?.toString() ?? 'pending_review',
+      topIssue: json['top_issue']?.toString() ?? '',
+      recommendedAction: json['recommended_action']?.toString() ?? '',
     );
   }
 }
@@ -410,6 +423,172 @@ class VisionObjectiveResponse {
       objectiveText: json['objective_text'] as String? ?? '',
       model: json['model'] as String? ?? 'unknown',
       confidence: json['confidence'] as String? ?? 'medium',
+    );
+  }
+}
+
+class PatientAfterVisitSummary {
+  const PatientAfterVisitSummary({
+    required this.caseId,
+    required this.audience,
+    required this.readingLevel,
+    required this.whatWeFound,
+    required this.whatYouNeedToDoNext,
+    required this.whenToGetHelp,
+    required this.disclaimer,
+  });
+
+  final String caseId;
+  final String audience;
+  final String readingLevel;
+  final List<String> whatWeFound;
+  final List<String> whatYouNeedToDoNext;
+  final List<String> whenToGetHelp;
+  final String disclaimer;
+
+  factory PatientAfterVisitSummary.fromJson(Map<String, dynamic> json) {
+    List<String> parseList(String key) {
+      final dynamic raw = json[key];
+      if (raw is! List) return const [];
+      return raw.whereType<Object>().map((item) => item.toString()).where((item) => item.trim().isNotEmpty).toList();
+    }
+
+    return PatientAfterVisitSummary(
+      caseId: json['case_id'] as String? ?? '',
+      audience: json['audience'] as String? ?? 'patient',
+      readingLevel: json['reading_level'] as String? ?? '5th_grade',
+      whatWeFound: parseList('what_we_found'),
+      whatYouNeedToDoNext: parseList('what_you_need_to_do_next'),
+      whenToGetHelp: parseList('when_to_get_help'),
+      disclaimer: json['disclaimer'] as String? ?? '',
+    );
+  }
+}
+
+class OrchestratorDuringVisitResult {
+  const OrchestratorDuringVisitResult({
+    required this.caseId,
+    required this.bufferLength,
+    required this.elapsedSeconds,
+    required this.nudge,
+  });
+
+  final String caseId;
+  final int bufferLength;
+  final int elapsedSeconds;
+  final ClinicalNudgeEvent? nudge;
+
+  factory OrchestratorDuringVisitResult.fromJson(Map<String, dynamic> json) {
+    final nudgePayload = json['nudge'];
+    return OrchestratorDuringVisitResult(
+      caseId: json['case_id'] as String? ?? '',
+      bufferLength: (json['buffer_length'] as num?)?.toInt() ?? 0,
+      elapsedSeconds: (json['elapsed_seconds'] as num?)?.toInt() ?? 0,
+      nudge: nudgePayload is Map<String, dynamic>
+          ? ClinicalNudgeEvent.fromJson(
+              {
+                'type': 'clinical_nudge',
+                'case_id': json['case_id'] as String? ?? '',
+                'payload': nudgePayload,
+              },
+            )
+          : null,
+    );
+  }
+}
+
+class OrchestratorPostVisitResult {
+  const OrchestratorPostVisitResult({
+    required this.caseId,
+    required this.signAllowed,
+    required this.preSignValidation,
+    required this.outputs,
+  });
+
+  final String caseId;
+  final bool signAllowed;
+  final Map<String, dynamic> preSignValidation;
+  final Map<String, dynamic> outputs;
+
+  factory OrchestratorPostVisitResult.fromJson(Map<String, dynamic> json) {
+    return OrchestratorPostVisitResult(
+      caseId: json['case_id'] as String? ?? '',
+      signAllowed: json['sign_allowed'] as bool? ?? false,
+      preSignValidation: Map<String, dynamic>.from(json['pre_sign_validation'] as Map? ?? const {}),
+      outputs: Map<String, dynamic>.from(json['outputs'] as Map? ?? const {}),
+    );
+  }
+}
+
+class OfflineReadinessCheck {
+  const OfflineReadinessCheck({
+    required this.name,
+    required this.ok,
+    required this.detail,
+  });
+
+  final String name;
+  final bool ok;
+  final String detail;
+
+  factory OfflineReadinessCheck.fromJson(Map<String, dynamic> json) {
+    return OfflineReadinessCheck(
+      name: json['name'] as String? ?? 'unknown',
+      ok: json['ok'] as bool? ?? false,
+      detail: json['detail'] as String? ?? '',
+    );
+  }
+}
+
+class OfflineReadinessStatus {
+  const OfflineReadinessStatus({
+    required this.workspace,
+    required this.requestedModels,
+    required this.databaseMode,
+    required this.checks,
+    required this.ready,
+  });
+
+  final String workspace;
+  final List<String> requestedModels;
+  final String databaseMode;
+  final List<OfflineReadinessCheck> checks;
+  final bool ready;
+
+  factory OfflineReadinessStatus.fromJson(Map<String, dynamic> json) {
+    return OfflineReadinessStatus(
+      workspace: json['workspace'] as String? ?? '',
+      requestedModels: (json['requested_models'] as List<dynamic>? ?? const [])
+          .map((item) => item.toString())
+          .toList(),
+      databaseMode: json['database_mode'] as String? ?? 'unknown',
+      checks: (json['checks'] as List<dynamic>? ?? const [])
+          .map((item) => OfflineReadinessCheck.fromJson(item as Map<String, dynamic>))
+          .toList(),
+      ready: json['ready'] as bool? ?? false,
+    );
+  }
+}
+
+class VoiceCommandResponse {
+  const VoiceCommandResponse({
+    required this.intent,
+    required this.responseText,
+    required this.actionCode,
+    required this.data,
+  });
+
+  final String intent;
+  final String responseText;
+  final String actionCode;
+  final Map<String, dynamic> data;
+
+  factory VoiceCommandResponse.fromJson(Map<String, dynamic> json) {
+    return VoiceCommandResponse(
+      intent: json['intent'] as String? ?? 'unknown',
+      responseText: json['response_text'] as String? ?? '',
+      actionCode: json['action_code'] as String? ?? 'none',
+      data: _asMap(json['data']),
     );
   }
 }

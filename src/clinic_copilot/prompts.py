@@ -41,12 +41,12 @@ def build_system_prompt() -> str:
     )
 
 
-    def build_scribe_system_prompt(retrieved_context: str) -> str:
-      return (
+def build_scribe_system_prompt(retrieved_context: str) -> str:
+    return (
         f"{SCRIBE_SYSTEM_PROMPT}\n\n"
         "Retrieved Context:\n"
         f"{retrieved_context.strip() or 'No retrieved historical context provided.'}"
-      )
+    )
 
 
 def build_pipeline_context(request: ClinicalNoteRequest) -> str:

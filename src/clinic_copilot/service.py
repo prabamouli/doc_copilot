@@ -957,6 +957,22 @@ class ClinicalDocumentationService:
             raise ValueError("media_type must be either 'image' or 'video'")
         return self._llm_client.analyze_visual_objective(media_path=media_path, media_type=media_type)
 
+    def generate_patient_after_visit_summary(self, case_id: str) -> dict[str, Any]:
+        case = self._repository.get_case(case_id)
+        payload = self._llm_client.generate_patient_after_visit_summary(case.note.soap_note)
+        return {
+            "case_id": case.case_id,
+            "audience": "patient",
+            "reading_level": "5th_grade",
+            "what_we_found": payload.get("what_we_found", []),
+            "what_you_need_to_do_next": payload.get("what_you_need_to_do_next", []),
+            "when_to_get_help": payload.get("when_to_get_help", []),
+            "disclaimer": (
+                "This summary is for understanding your visit. "
+                "If symptoms get worse, contact your clinician."
+            ),
+        }
+
     def debug_retrieve_patient_history(self, patient_id: str, current_complaint: str, top_k: int = 5) -> dict[str, Any]:
         if not patient_id.strip():
             raise ValueError("patient_id is required")

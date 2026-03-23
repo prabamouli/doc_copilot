@@ -20,6 +20,7 @@ class ClinicalNudgeSocket {
     required String caseId,
     required String transcript,
     required int elapsedSeconds,
+    required String sensitivity,
   }) {
     _channel.sink.add(
       jsonEncode(
@@ -27,6 +28,7 @@ class ClinicalNudgeSocket {
           'case_id': caseId,
           'transcript': transcript,
           'elapsed_seconds': elapsedSeconds,
+          'sensitivity': sensitivity,
         },
       ),
     );
@@ -244,6 +246,63 @@ class ClinicApiClient {
     return PatientHistoryDebugResponse.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
   }
 
+  Future<PatientHistoryDebugResponse> fetchOrchestratorPreVisit({
+    required String patientId,
+    required String currentComplaint,
+    int topK = 5,
+  }) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/v1/orchestrator/pre-visit'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode(
+        {
+          'patient_id': patientId,
+          'current_complaint': currentComplaint,
+          'top_k': topK,
+        },
+      ),
+    );
+    _ensureSuccess(response);
+    final payload = jsonDecode(response.body) as Map<String, dynamic>;
+    return PatientHistoryDebugResponse(
+      patientId: payload['patient_id'] as String? ?? patientId,
+      currentComplaint: payload['current_complaint'] as String? ?? currentComplaint,
+      historicalContext: payload['briefing'] as String? ?? '',
+      retrieved: (payload['retrieved'] as List<dynamic>? ?? const [])
+          .map((item) => RetrievedHistoryItem.fromJson(item as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+
+  Future<OrchestratorDuringVisitResult> orchestratorDuringVisit({
+    required String caseId,
+    required String transcriptChunk,
+    required String sensitivity,
+  }) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/v1/orchestrator/during-visit'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode(
+        {
+          'case_id': caseId,
+          'transcript_chunk': transcriptChunk,
+          'sensitivity': sensitivity,
+        },
+      ),
+    );
+    _ensureSuccess(response);
+    return OrchestratorDuringVisitResult.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  Future<OrchestratorPostVisitResult> orchestratorPostVisit(String caseId) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/v1/orchestrator/post-visit/$caseId'),
+      headers: {'Content-Type': 'application/json'},
+    );
+    _ensureSuccess(response);
+    return OrchestratorPostVisitResult.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
   Future<VisionObjectiveResponse> analyzeVisionMedia({
     required String mediaPath,
     required String mediaType,
@@ -259,6 +318,31 @@ class ClinicApiClient {
     final response = await http.Response.fromStream(streamed);
     _ensureSuccess(response);
     return VisionObjectiveResponse.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  Future<PatientAfterVisitSummary> fetchPatientAfterVisitSummary(String caseId) async {
+    final response = await _client.get(Uri.parse('$baseUrl/v1/cases/$caseId/patient-avs'));
+    _ensureSuccess(response);
+    return PatientAfterVisitSummary.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  Future<OfflineReadinessStatus> fetchOfflineReadiness({bool prepull = false}) async {
+    final response = await _client.get(Uri.parse('$baseUrl/v1/admin/offline-readiness?prepull=$prepull'));
+    _ensureSuccess(response);
+    return OfflineReadinessStatus.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  Future<VoiceCommandResponse> processVoiceCommand({
+    required String caseId,
+    required String text,
+  }) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/v1/voice-assistant/command'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'case_id': caseId, 'text': text}),
+    );
+    _ensureSuccess(response);
+    return VoiceCommandResponse.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
   }
 
   void _ensureSuccess(http.Response response) {

@@ -1,0 +1,179 @@
+{
+  "agent": {
+    "id": "patient_communicator_agent",
+    "name": "Patient Communicator Agent",
+    "version": "1.0.0",
+    "description": "Turn clinician SOAP notes into a plain-language after-visit summary for patients at roughly 5th-grade reading level."
+  },
+  "graph": {
+    "id": "patient_communicator_agent-graph",
+    "goal_id": "patient-communicator-goal",
+    "version": "1.0.0",
+    "entry_node": "read_soap",
+    "entry_points": {
+      "start": "read_soap"
+    },
+    "pause_nodes": [],
+    "terminal_nodes": [
+      "deliver_avs"
+    ],
+    "nodes": [
+      {
+        "id": "read_soap",
+        "name": "Read SOAP",
+        "description": "Load the clinician SOAP note and identify patient-facing facts.",
+        "node_type": "event_loop",
+        "input_keys": [],
+        "output_keys": [
+          "soap_payload"
+        ],
+        "nullable_output_keys": [],
+        "input_schema": {},
+        "output_schema": {},
+        "system_prompt": "Collect SOAP sections and key instructions from the chart. Keep only what is supported by the clinician note.",
+        "tools": [],
+        "model": null,
+        "function": null,
+        "routes": {},
+        "max_retries": 3,
+        "retry_on": [],
+        "max_node_visits": 1,
+        "output_model": null,
+        "max_validation_retries": 2,
+        "client_facing": false
+      },
+      {
+        "id": "rewrite_plain_language",
+        "name": "Rewrite Plain Language",
+        "description": "Translate clinical language into simple bullet points a patient can understand.",
+        "node_type": "event_loop",
+        "input_keys": [
+          "soap_payload"
+        ],
+        "output_keys": [
+          "plain_language_avs"
+        ],
+        "nullable_output_keys": [],
+        "input_schema": {},
+        "output_schema": {},
+        "system_prompt": "Use short plain-language bullets. Avoid jargon. Target roughly 5th-grade readability and clear action steps.",
+        "tools": [],
+        "model": null,
+        "function": null,
+        "routes": {},
+        "max_retries": 3,
+        "retry_on": [],
+        "max_node_visits": 1,
+        "output_model": null,
+        "max_validation_retries": 2,
+        "client_facing": false
+      },
+      {
+        "id": "deliver_avs",
+        "name": "Deliver AVS",
+        "description": "Return a friendly after-visit summary with findings, next steps, and help-now warnings.",
+        "node_type": "event_loop",
+        "input_keys": [
+          "plain_language_avs"
+        ],
+        "output_keys": [
+          "patient_summary"
+        ],
+        "nullable_output_keys": [],
+        "input_schema": {},
+        "output_schema": {},
+        "system_prompt": "Present the AVS in a patient-friendly structure: what we found, what to do next, and when to get help.",
+        "tools": [],
+        "model": null,
+        "function": null,
+        "routes": {},
+        "max_retries": 3,
+        "retry_on": [],
+        "max_node_visits": 1,
+        "output_model": null,
+        "max_validation_retries": 2,
+        "client_facing": true
+      }
+    ],
+    "edges": [
+      {
+        "id": "read_soap-to-rewrite_plain_language",
+        "source": "read_soap",
+        "target": "rewrite_plain_language",
+        "condition": "on_success",
+        "condition_expr": null,
+        "priority": 1,
+        "input_mapping": {}
+      },
+      {
+        "id": "rewrite_plain_language-to-deliver_avs",
+        "source": "rewrite_plain_language",
+        "target": "deliver_avs",
+        "condition": "on_success",
+        "condition_expr": null,
+        "priority": 1,
+        "input_mapping": {}
+      }
+    ],
+    "max_steps": 50,
+    "max_retries_per_node": 3,
+    "description": "Converts clinician SOAP notes into patient-friendly after-visit summaries.",
+    "created_at": "2026-03-23T00:00:00Z"
+  },
+  "goal": {
+    "id": "patient-communicator-goal",
+    "name": "Patient Plain Language AVS",
+    "description": "Help patients understand visit findings and next steps using simple language.",
+    "status": "draft",
+    "success_criteria": [
+      {
+        "id": "sc-readable",
+        "description": "Output is simple, short, and patient-friendly.",
+        "metric": "readability",
+        "target": "approximately 5th-grade",
+        "weight": 0.4,
+        "met": false
+      },
+      {
+        "id": "sc-actionable",
+        "description": "Contains clear next steps and warning guidance.",
+        "metric": "actionability",
+        "target": "high",
+        "weight": 0.35,
+        "met": false
+      },
+      {
+        "id": "sc-grounded",
+        "description": "Only includes facts grounded in SOAP note content.",
+        "metric": "unsupported_fact_rate",
+        "target": "0",
+        "weight": 0.25,
+        "met": false
+      }
+    ],
+    "constraints": [
+      {
+        "id": "c-no-medical-overreach",
+        "description": "Do not replace clinician advice or make unsupported diagnostic claims.",
+        "constraint_type": "hard",
+        "category": "safety",
+        "check": ""
+      }
+    ],
+    "context": {},
+    "required_capabilities": [],
+    "input_schema": {},
+    "output_schema": {},
+    "version": "1.0.0",
+    "parent_version": null,
+    "evolution_reason": null,
+    "created_at": "2026-03-23T00:00:00Z",
+    "updated_at": "2026-03-23T00:00:00Z"
+  },
+  "required_tools": [],
+  "metadata": {
+    "created_at": "2026-03-23T00:00:00Z",
+    "node_count": 3,
+    "edge_count": 2
+  }
+}

@@ -19,6 +19,9 @@ These agent definitions are project-relevant Hive exports for the current Clinic
 - `billing_optimizer_agent`
   Detects potential revenue leakage by finding billable procedures in SOAP sections that are missing from summary-level capture, then suggests CPT codes.
 
+- `patient_communicator_agent`
+  Rewrites SOAP notes into a plain-language patient after-visit summary (AVS) with simple bullets for findings, next steps, and help-now warnings.
+
 ## Why these agents
 
 These map cleanly to the product we have already built:

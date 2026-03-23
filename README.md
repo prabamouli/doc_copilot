@@ -143,6 +143,34 @@ Persists clinician-edited summary and SOAP text, resets the case to `pending_rev
 
 Returns recent audit entries, optionally filtered by `case_id`.
 
+### `POST /v1/orchestrator/pre-visit`
+
+Builds a pre-visit briefing from longitudinal retrieval context.
+
+### `POST /v1/orchestrator/during-visit`
+
+Appends transcript chunks to a live buffer and returns any triggered clinical nudge.
+
+### `POST /v1/orchestrator/post-visit/{case_id}`
+
+Runs post-visit parallel agents (scribe, billing, patient summary) and returns pre-sign consistency validation.
+
+## Offline readiness command
+
+Use this before clinic opening to verify sovereign mode prerequisites:
+
+```bash
+cd /Users/prabhamini/Documents/clinic_copilot_mvp
+source .venv/bin/activate
+python scripts/offline_readiness.py --json
+```
+
+Optional model pre-pull:
+
+```bash
+python scripts/offline_readiness.py --prepull
+```
+
 ## Next steps
 
 - Add auth and role-based access
