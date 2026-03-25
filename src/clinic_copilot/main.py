@@ -30,6 +30,20 @@ from clinic_copilot.schemas import (
     OrchestratorPostVisitResponse,
     OrchestratorPreVisitRequest,
     OrchestratorPreVisitResponse,
+    PatientTimelineSummaryRequest,
+    PatientTimelineSummaryResponse,
+    RagMedicalValidationRequest,
+    RagMedicalValidationResponse,
+    FullOutputValidationRequest,
+    FullOutputValidationResponse,
+    CriticReviewRequest,
+    CriticReviewResponse,
+    DiagnosisConfidenceScoreRequest,
+    DiagnosisConfidenceScoreResponse,
+    PatientFriendlySummaryRequest,
+    PatientFriendlySummaryResponse,
+    PrescriptionDraftRequest,
+    PrescriptionDraftResponse,
     PatientHistoryDebugRequest,
     PatientHistoryDebugResponse,
     PatientAfterVisitSummaryResponse,
@@ -164,6 +178,69 @@ def retrieve_patient_history(request: PatientHistoryDebugRequest) -> PatientHist
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Patient history retrieval failed: {exc}") from exc
+
+
+@app.post("/v1/patient-history/timeline-summary", response_model=PatientTimelineSummaryResponse)
+def summarize_patient_timeline(request: PatientTimelineSummaryRequest) -> PatientTimelineSummaryResponse:
+    try:
+        payload = service.summarize_patient_timeline(request.past_records)
+        return PatientTimelineSummaryResponse.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Patient timeline summarization failed: {exc}") from exc
+
+
+@app.post("/v1/diagnosis/rag-validate", response_model=RagMedicalValidationResponse)
+def rag_validate_diagnosis(request: RagMedicalValidationRequest) -> RagMedicalValidationResponse:
+    try:
+        payload = service.rag_validate_diagnosis(diagnosis=request.diagnosis, context=request.context)
+        return RagMedicalValidationResponse.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"RAG diagnosis validation failed: {exc}") from exc
+
+
+@app.post("/v1/validation/full-output", response_model=FullOutputValidationResponse)
+def validate_full_output(request: FullOutputValidationRequest) -> FullOutputValidationResponse:
+    try:
+        payload = service.validate_full_clinical_output(request.full_output)
+        return FullOutputValidationResponse.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Full output validation failed: {exc}") from exc
+
+
+@app.post("/v1/critic/review", response_model=CriticReviewResponse)
+def critic_review(request: CriticReviewRequest) -> CriticReviewResponse:
+    try:
+        payload = service.critic_review_output(request.output)
+        return CriticReviewResponse.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Critic review failed: {exc}") from exc
+
+
+@app.post("/v1/diagnosis/confidence-score", response_model=DiagnosisConfidenceScoreResponse)
+def diagnosis_confidence_score(request: DiagnosisConfidenceScoreRequest) -> DiagnosisConfidenceScoreResponse:
+    try:
+        payload = service.score_diagnosis_confidence(request.diagnosis)
+        return DiagnosisConfidenceScoreResponse.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Diagnosis confidence scoring failed: {exc}") from exc
+
+
+@app.post("/v1/patient-summary/friendly", response_model=PatientFriendlySummaryResponse)
+def patient_friendly_summary(request: PatientFriendlySummaryRequest) -> PatientFriendlySummaryResponse:
+    try:
+        payload = service.generate_patient_friendly_summary(request.soap_note)
+        return PatientFriendlySummaryResponse.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Patient-friendly summary generation failed: {exc}") from exc
+
+
+@app.post("/v1/prescription/generate", response_model=PrescriptionDraftResponse)
+def generate_prescription_draft(request: PrescriptionDraftRequest) -> PrescriptionDraftResponse:
+    try:
+        payload = service.generate_prescription_draft(request.treatment)
+        return PrescriptionDraftResponse.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Prescription draft generation failed: {exc}") from exc
 
 
 @app.post("/v1/orchestrator/pre-visit", response_model=OrchestratorPreVisitResponse)

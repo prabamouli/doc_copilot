@@ -1,5 +1,7 @@
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -23,14 +25,12 @@ class ClinicalNudgeSocket {
     required String sensitivity,
   }) {
     _channel.sink.add(
-      jsonEncode(
-        {
-          'case_id': caseId,
-          'transcript': transcript,
-          'elapsed_seconds': elapsedSeconds,
-          'sensitivity': sensitivity,
-        },
-      ),
+      jsonEncode({
+        'case_id': caseId,
+        'transcript': transcript,
+        'elapsed_seconds': elapsedSeconds,
+        'sensitivity': sensitivity,
+      }),
     );
   }
 
@@ -40,15 +40,33 @@ class ClinicalNudgeSocket {
 }
 
 class ClinicApiClient {
+  static const _envApiBaseUrl = String.fromEnvironment(
+    'API_BASE_URL',
+    defaultValue: '',
+  );
+
   ClinicApiClient({http.Client? client})
-      : _client = client ?? http.Client(),
-        baseUrl = const String.fromEnvironment(
-          'API_BASE_URL',
-          defaultValue: 'http://127.0.0.1:8000',
-        );
+    : _client = client ?? http.Client(),
+      baseUrl = _envApiBaseUrl.isNotEmpty
+          ? _envApiBaseUrl
+          : _platformDefaultBaseUrl();
 
   final http.Client _client;
   final String baseUrl;
+
+  static String _platformDefaultBaseUrl() {
+    if (kIsWeb) {
+      return 'http://127.0.0.1:8000';
+    }
+    try {
+      if (Platform.isAndroid) {
+        return 'http://10.0.2.2:8000';
+      }
+    } on UnsupportedError {
+      // Keep localhost fallback for non-IO platforms.
+    }
+    return 'http://127.0.0.1:8000';
+  }
 
   ClinicalNudgeSocket connectClinicalNudges() {
     final httpUri = Uri.parse(baseUrl);
@@ -63,7 +81,9 @@ class ClinicApiClient {
   Future<CaseRecord> fetchDemoCase() async {
     final response = await _client.get(Uri.parse('$baseUrl/v1/demo-case'));
     _ensureSuccess(response);
-    return CaseRecord.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return CaseRecord.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   Future<List<CaseRecord>> fetchCases() async {
@@ -77,11 +97,15 @@ class ClinicApiClient {
   Future<CaseRecord> fetchCase(String caseId) async {
     final response = await _client.get(Uri.parse('$baseUrl/v1/cases/$caseId'));
     _ensureSuccess(response);
-    return CaseRecord.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return CaseRecord.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   Future<List<AuditLogEntry>> fetchAuditLogs(String caseId) async {
-    final response = await _client.get(Uri.parse('$baseUrl/v1/audit-logs?case_id=$caseId'));
+    final response = await _client.get(
+      Uri.parse('$baseUrl/v1/audit-logs?case_id=$caseId'),
+    );
     _ensureSuccess(response);
     return (jsonDecode(response.body) as List<dynamic>)
         .map((item) => AuditLogEntry.fromJson(item as Map<String, dynamic>))
@@ -103,19 +127,19 @@ class ClinicApiClient {
     final response = await _client.post(
       Uri.parse('$baseUrl/v1/agents/clinical_intake_agent/run'),
       headers: {'Content-Type': 'application/json'},
-      body: jsonEncode(
-        {
-          'transcript': transcript,
-          'visit_context': {
-            'locale': 'en-IN',
-            'specialty': 'general_medicine',
-            'clinician_name': clinicianName,
-          },
+      body: jsonEncode({
+        'transcript': transcript,
+        'visit_context': {
+          'locale': 'en-IN',
+          'specialty': 'general_medicine',
+          'clinician_name': clinicianName,
         },
-      ),
+      }),
     );
     _ensureSuccess(response);
-    return AgentRunResponse.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return AgentRunResponse.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   Future<AgentRunResponse> runSafetyReviewer(String caseId) async {
@@ -125,7 +149,9 @@ class ClinicApiClient {
       body: jsonEncode({'case_id': caseId}),
     );
     _ensureSuccess(response);
-    return AgentRunResponse.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return AgentRunResponse.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   Future<AgentRunResponse> runQueueOrchestrator() async {
@@ -135,7 +161,9 @@ class ClinicApiClient {
       body: jsonEncode({}),
     );
     _ensureSuccess(response);
-    return AgentRunResponse.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return AgentRunResponse.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   Future<AgentRunResponse> runBillingOptimizer(String caseId) async {
@@ -145,7 +173,33 @@ class ClinicApiClient {
       body: jsonEncode({'case_id': caseId}),
     );
     _ensureSuccess(response);
-    return AgentRunResponse.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return AgentRunResponse.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<AgentRunResponse> runScribeAgent(String caseId) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/v1/agents/scribe_agent/run'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'case_id': caseId}),
+    );
+    _ensureSuccess(response);
+    return AgentRunResponse.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<AgentRunResponse> runPatientCommunicatorAgent(String caseId) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/v1/agents/patient_communicator_agent/run'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'case_id': caseId}),
+    );
+    _ensureSuccess(response);
+    return AgentRunResponse.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   Future<void> captureConversationSnapshot({
@@ -169,16 +223,16 @@ class ClinicApiClient {
     final response = await _client.post(
       Uri.parse('$baseUrl/v1/cases/$caseId/review'),
       headers: {'Content-Type': 'application/json'},
-      body: jsonEncode(
-        {
-          'status': status,
-          'reviewed_by': reviewedBy,
-          'clinician_feedback': feedback,
-        },
-      ),
+      body: jsonEncode({
+        'status': status,
+        'reviewed_by': reviewedBy,
+        'clinician_feedback': feedback,
+      }),
     );
     _ensureSuccess(response);
-    return CaseRecord.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return CaseRecord.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   Future<CaseRecord> amendNote({
@@ -201,29 +255,29 @@ class ClinicApiClient {
     final response = await _client.post(
       Uri.parse('$baseUrl/v1/cases/$caseId/amend'),
       headers: {'Content-Type': 'application/json'},
-      body: jsonEncode(
-        {
-          'edited_by': editedBy,
-          'reason': reason,
-          'note': {
-            'summary': summary,
-            'subjective': subjective,
-            'objective': objective,
-            'assessment': assessment,
-            'plan': plan,
-            'symptoms': symptoms,
-            'duration': duration,
-            'severity': severity,
-            'medical_history': medicalHistory,
-            'medications': medications,
-            'allergies': allergies,
-            'vitals': vitals,
-          },
+      body: jsonEncode({
+        'edited_by': editedBy,
+        'reason': reason,
+        'note': {
+          'summary': summary,
+          'subjective': subjective,
+          'objective': objective,
+          'assessment': assessment,
+          'plan': plan,
+          'symptoms': symptoms,
+          'duration': duration,
+          'severity': severity,
+          'medical_history': medicalHistory,
+          'medications': medications,
+          'allergies': allergies,
+          'vitals': vitals,
         },
-      ),
+      }),
     );
     _ensureSuccess(response);
-    return CaseRecord.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return CaseRecord.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   Future<PatientHistoryDebugResponse> fetchPatientHistoryDebug({
@@ -234,16 +288,16 @@ class ClinicApiClient {
     final response = await _client.post(
       Uri.parse('$baseUrl/v1/patient-history/retrieve'),
       headers: {'Content-Type': 'application/json'},
-      body: jsonEncode(
-        {
-          'patient_id': patientId,
-          'current_complaint': currentComplaint,
-          'top_k': topK,
-        },
-      ),
+      body: jsonEncode({
+        'patient_id': patientId,
+        'current_complaint': currentComplaint,
+        'top_k': topK,
+      }),
     );
     _ensureSuccess(response);
-    return PatientHistoryDebugResponse.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return PatientHistoryDebugResponse.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   Future<PatientHistoryDebugResponse> fetchOrchestratorPreVisit({
@@ -254,22 +308,24 @@ class ClinicApiClient {
     final response = await _client.post(
       Uri.parse('$baseUrl/v1/orchestrator/pre-visit'),
       headers: {'Content-Type': 'application/json'},
-      body: jsonEncode(
-        {
-          'patient_id': patientId,
-          'current_complaint': currentComplaint,
-          'top_k': topK,
-        },
-      ),
+      body: jsonEncode({
+        'patient_id': patientId,
+        'current_complaint': currentComplaint,
+        'top_k': topK,
+      }),
     );
     _ensureSuccess(response);
     final payload = jsonDecode(response.body) as Map<String, dynamic>;
     return PatientHistoryDebugResponse(
       patientId: payload['patient_id'] as String? ?? patientId,
-      currentComplaint: payload['current_complaint'] as String? ?? currentComplaint,
+      currentComplaint:
+          payload['current_complaint'] as String? ?? currentComplaint,
       historicalContext: payload['briefing'] as String? ?? '',
       retrieved: (payload['retrieved'] as List<dynamic>? ?? const [])
-          .map((item) => RetrievedHistoryItem.fromJson(item as Map<String, dynamic>))
+          .map(
+            (item) =>
+                RetrievedHistoryItem.fromJson(item as Map<String, dynamic>),
+          )
           .toList(),
     );
   }
@@ -282,54 +338,172 @@ class ClinicApiClient {
     final response = await _client.post(
       Uri.parse('$baseUrl/v1/orchestrator/during-visit'),
       headers: {'Content-Type': 'application/json'},
-      body: jsonEncode(
-        {
-          'case_id': caseId,
-          'transcript_chunk': transcriptChunk,
-          'sensitivity': sensitivity,
-        },
-      ),
+      body: jsonEncode({
+        'case_id': caseId,
+        'transcript_chunk': transcriptChunk,
+        'sensitivity': sensitivity,
+      }),
     );
     _ensureSuccess(response);
-    return OrchestratorDuringVisitResult.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return OrchestratorDuringVisitResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
-  Future<OrchestratorPostVisitResult> orchestratorPostVisit(String caseId) async {
+  Future<OrchestratorPostVisitResult> orchestratorPostVisit(
+    String caseId,
+  ) async {
     final response = await _client.post(
       Uri.parse('$baseUrl/v1/orchestrator/post-visit/$caseId'),
       headers: {'Content-Type': 'application/json'},
     );
     _ensureSuccess(response);
-    return OrchestratorPostVisitResult.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return OrchestratorPostVisitResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<PatientTimelineSummary> summarizePatientTimeline(
+    dynamic pastRecords,
+  ) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/v1/patient-history/timeline-summary'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'past_records': pastRecords}),
+    );
+    _ensureSuccess(response);
+    return PatientTimelineSummary.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<RagMedicalValidationResult> ragValidateDiagnosis({
+    required dynamic diagnosis,
+    required dynamic context,
+  }) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/v1/diagnosis/rag-validate'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'diagnosis': diagnosis, 'context': context}),
+    );
+    _ensureSuccess(response);
+    return RagMedicalValidationResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<FullOutputValidationResult> validateFullOutput(
+    dynamic fullOutput,
+  ) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/v1/validation/full-output'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'full_output': fullOutput}),
+    );
+    _ensureSuccess(response);
+    return FullOutputValidationResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<CriticReviewResult> criticReview(dynamic output) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/v1/critic/review'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'output': output}),
+    );
+    _ensureSuccess(response);
+    return CriticReviewResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<DiagnosisConfidenceScoreResult> scoreDiagnosisConfidence(
+    dynamic diagnosis,
+  ) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/v1/diagnosis/confidence-score'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'diagnosis': diagnosis}),
+    );
+    _ensureSuccess(response);
+    return DiagnosisConfidenceScoreResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<PatientFriendlySummaryResult> generatePatientFriendlySummary(
+    dynamic soapNote,
+  ) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/v1/patient-summary/friendly'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'soap_note': soapNote}),
+    );
+    _ensureSuccess(response);
+    return PatientFriendlySummaryResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<PrescriptionDraftResult> generatePrescriptionDraft(
+    dynamic treatment,
+  ) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/v1/prescription/generate'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'treatment': treatment}),
+    );
+    _ensureSuccess(response);
+    return PrescriptionDraftResult.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   Future<VisionObjectiveResponse> analyzeVisionMedia({
     required String mediaPath,
     required String mediaType,
   }) async {
-    final request = http.MultipartRequest(
-      'POST',
-      Uri.parse('$baseUrl/v1/vision-agent/analyze'),
-    )
-      ..fields['media_type'] = mediaType
-      ..files.add(await http.MultipartFile.fromPath('media_file', mediaPath));
+    final request =
+        http.MultipartRequest(
+            'POST',
+            Uri.parse('$baseUrl/v1/vision-agent/analyze'),
+          )
+          ..fields['media_type'] = mediaType
+          ..files.add(
+            await http.MultipartFile.fromPath('media_file', mediaPath),
+          );
 
     final streamed = await _client.send(request);
     final response = await http.Response.fromStream(streamed);
     _ensureSuccess(response);
-    return VisionObjectiveResponse.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return VisionObjectiveResponse.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
-  Future<PatientAfterVisitSummary> fetchPatientAfterVisitSummary(String caseId) async {
-    final response = await _client.get(Uri.parse('$baseUrl/v1/cases/$caseId/patient-avs'));
+  Future<PatientAfterVisitSummary> fetchPatientAfterVisitSummary(
+    String caseId,
+  ) async {
+    final response = await _client.get(
+      Uri.parse('$baseUrl/v1/cases/$caseId/patient-avs'),
+    );
     _ensureSuccess(response);
-    return PatientAfterVisitSummary.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return PatientAfterVisitSummary.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
-  Future<OfflineReadinessStatus> fetchOfflineReadiness({bool prepull = false}) async {
-    final response = await _client.get(Uri.parse('$baseUrl/v1/admin/offline-readiness?prepull=$prepull'));
+  Future<OfflineReadinessStatus> fetchOfflineReadiness({
+    bool prepull = false,
+  }) async {
+    final response = await _client.get(
+      Uri.parse('$baseUrl/v1/admin/offline-readiness?prepull=$prepull'),
+    );
     _ensureSuccess(response);
-    return OfflineReadinessStatus.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return OfflineReadinessStatus.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   Future<VoiceCommandResponse> processVoiceCommand({
@@ -342,12 +516,16 @@ class ClinicApiClient {
       body: jsonEncode({'case_id': caseId, 'text': text}),
     );
     _ensureSuccess(response);
-    return VoiceCommandResponse.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return VoiceCommandResponse.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   void _ensureSuccess(http.Response response) {
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception('Request failed (${response.statusCode}): ${response.body}');
+      throw Exception(
+        'Request failed (${response.statusCode}): ${response.body}',
+      );
     }
   }
 }

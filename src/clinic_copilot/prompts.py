@@ -74,10 +74,12 @@ Return JSON only:
   "history": [],
   "medications": [],
   "allergies": [],
-  "vitals": []
+  "vitals": [],
+  "lifestyle": []
 }}
 
 If not present -> empty array
+Do not infer.
 
 {build_pipeline_context(request)}
 """.strip()
@@ -120,27 +122,26 @@ RULES:
 def build_diagnosis_prompt(entities: ClinicalEntities) -> str:
     return f"""
 text id="diag001"
-Based ONLY on extracted data, suggest possible conditions.
+Suggest possible diagnoses based ONLY on input structured data.
 
 Rules:
 - Max 3 conditions
-- Include reasoning
-- Include confidence
-- Do NOT claim certainty
+- Include reasoning for each diagnosis
+- Include confidence as low|medium|high
+- No definitive statements
+- Do not infer beyond available data
 
 Structured data:
 {json.dumps(_entities_for_prompt(entities), indent=2)}
 
-Output JSON:
-{{
-  "conditions": [
-    {{
-      "condition": "",
-      "reason": "",
-      "confidence": "low|medium|high"
-    }}
-  ]
-}}
+Output JSON (array only):
+[
+  {{
+    "condition": "",
+    "reason": "",
+    "confidence": "low|medium|high"
+  }}
+]
 """.strip()
 
 
@@ -153,9 +154,10 @@ text id="treat001"
 Generate a conservative treatment plan.
 
 Rules:
-- Only common treatments
-- Avoid risky advice
-- Add "Doctor validation required"
+- Only common first-line treatments
+- Avoid risky interventions
+- Keep recommendations conservative and non-definitive
+- warning must be exactly "Doctor validation required"
 
 Structured data:
 {json.dumps(_entities_for_prompt(entities), indent=2)}
@@ -165,7 +167,8 @@ Output JSON:
   "medications": [],
   "tests": [],
   "advice": [],
-  "follow_up": ""
+  "follow_up": "",
+  "warning": "Doctor validation required"
 }}
 
 {prompt_tail}
@@ -221,3 +224,154 @@ def _entities_for_prompt(entities: ClinicalEntities) -> dict[str, list[str]]:
         "allergies": [item.value for item in entities.allergies],
         "vitals": [item.value for item in entities.vitals],
     }
+
+
+def build_patient_timeline_summary_prompt(past_records: object) -> str:
+    return f"""
+text id="timeline001"
+Summarize patient history across visits.
+
+INPUT:
+{json.dumps(past_records, indent=2, default=str)}
+
+OUTPUT JSON:
+{{
+  "chronic_conditions": [],
+  "recurring_symptoms": [],
+  "medication_history": [],
+  "trend_summary": ""
+}}
+
+RULES:
+- Identify patterns
+- Do not assume causation
+- Use only evidence present in input
+""".strip()
+
+
+def build_rag_medical_validation_prompt(diagnosis: object, context: object) -> str:
+    return f"""
+text id="ragval001"
+Validate diagnosis using retrieved medical knowledge.
+
+INPUT:
+{{
+  "diagnosis": {json.dumps(diagnosis, default=str)},
+  "context": {json.dumps(context, default=str)}
+}}
+
+OUTPUT JSON:
+{{
+  "supported": true,
+  "evidence": "",
+  "confidence": ""
+}}
+
+RULES:
+- If no evidence, supported must be false
+- Do not infer facts not present in retrieved context
+- Keep evidence concise and directly relevant
+""".strip()
+
+
+def build_full_output_validation_prompt(full_output: object) -> str:
+    return f"""
+text id="fullval001"
+Validate full clinical output.
+
+INPUT:
+{json.dumps(full_output, indent=2, default=str)}
+
+CHECK:
+- Hallucinations
+- Logical inconsistencies
+- Unsafe recommendations
+
+OUTPUT JSON:
+{{
+  "valid": true,
+  "issues": [],
+  "severity": "low|medium|high"
+}}
+""".strip()
+
+
+def build_critic_review_prompt(output: object) -> str:
+    return f"""
+text id="critic001"
+Critically review the diagnosis and treatment.
+
+INPUT:
+{json.dumps(output, indent=2, default=str)}
+
+OUTPUT JSON:
+{{
+  "errors": [],
+  "improvements": [],
+  "final_verdict": "acceptable|needs_revision"
+}}
+""".strip()
+
+
+def build_diagnosis_confidence_prompt(diagnosis: object) -> str:
+    return f"""
+text id="confscore001"
+Assign confidence score.
+
+INPUT:
+{json.dumps(diagnosis, indent=2, default=str)}
+
+OUTPUT JSON:
+{{
+  "score": 0,
+  "reason": ""
+}}
+
+RULES:
+- score must be an integer from 0 to 100
+- be conservative when evidence is weak
+- reason must be concise and evidence-grounded
+""".strip()
+
+
+def build_patient_friendly_summary_prompt(soap_note: object) -> str:
+    return f"""
+text id="pfsummary001"
+Convert clinical data into simple explanation.
+
+INPUT:
+{json.dumps(soap_note, indent=2, default=str)}
+
+OUTPUT JSON:
+{{
+  "summary": ""
+}}
+
+RULES:
+- Simple English
+- No jargon
+- Max 150 words
+""".strip()
+
+
+def build_prescription_generator_prompt(treatment: object) -> str:
+    return f"""
+text id="rxgen001"
+Generate prescription draft.
+
+INPUT:
+{json.dumps(treatment, indent=2, default=str)}
+
+OUTPUT JSON:
+{{
+  "medications": [],
+  "dosage": [],
+  "instructions": [],
+  "notes": "Doctor must verify"
+}}
+
+RULES:
+- Use only treatment data provided in input
+- Keep items concise and practical
+- notes must be exactly "Doctor must verify"
+""".strip()

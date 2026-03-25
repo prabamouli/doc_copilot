@@ -13,7 +13,8 @@ import 'models.dart';
 enum WorkspaceView { overview, noteStudio, agents, audit }
 
 class DashboardScreen extends StatefulWidget {
-  const DashboardScreen({super.key, ClinicApiClient? apiClient}) : _apiClient = apiClient;
+  const DashboardScreen({super.key, ClinicApiClient? apiClient})
+    : _apiClient = apiClient;
 
   final ClinicApiClient? _apiClient;
 
@@ -25,7 +26,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final ScrollController _mainScrollController = ScrollController();
   late final ClinicApiClient _api;
 
-  final TextEditingController _reviewerController = TextEditingController(text: 'Dr. Maya');
+  final TextEditingController _reviewerController = TextEditingController(
+    text: 'Dr. Maya',
+  );
   final TextEditingController _feedbackController = TextEditingController();
   final TextEditingController _amendReasonController = TextEditingController();
   final TextEditingController _summaryController = TextEditingController();
@@ -40,8 +43,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final TextEditingController _medicationsController = TextEditingController();
   final TextEditingController _allergiesController = TextEditingController();
   final TextEditingController _vitalsController = TextEditingController();
-  final TextEditingController _agentTranscriptController = TextEditingController(
-    text: 'Doctor: What brings you in today? Patient: I have fever and body pain for 2 days. Doctor: Any allergies? Patient: No known allergies.',
+  final TextEditingController
+  _agentTranscriptController = TextEditingController(
+    text:
+        'Doctor: What brings you in today? Patient: I have fever and body pain for 2 days. Doctor: Any allergies? Patient: No known allergies.',
   );
   final TextEditingController _searchController = TextEditingController();
 
@@ -78,7 +83,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
   String _nudgeSensitivity = 'medium';
   bool _analyzingVision = false;
   bool _generatingPatientAvs = false;
+  bool _runningValidationEngines = false;
+  bool _runningValidationBatch = false;
+  int _validationBatchStep = 0;
+  int _validationBatchTotal = 0;
+  String _validationBatchLabel = '';
   PatientAfterVisitSummary? _latestPatientAvs;
+  PatientTimelineSummary? _latestTimelineSummary;
+  RagMedicalValidationResult? _latestRagValidation;
+  FullOutputValidationResult? _latestFullValidation;
+  CriticReviewResult? _latestCriticReview;
+  DiagnosisConfidenceScoreResult? _latestDiagnosisConfidence;
+  PatientFriendlySummaryResult? _latestPatientFriendlySummary;
+  PrescriptionDraftResult? _latestPrescriptionDraft;
   OfflineReadinessStatus? _offlineReadiness;
   bool _loadingOfflineReadiness = false;
   String? _lastNudgeId;
@@ -219,9 +236,29 @@ class _DashboardScreenState extends State<DashboardScreen> {
     if (eventId != null && eventId == _lastNudgeId) return;
     _lastNudgeId = eventId;
 
-    final text = event.evidence.isNotEmpty
-        ? '${event.message}\nEvidence: ${event.evidence}'
-        : event.message;
+    final lines = <String>[];
+    if (event.nextQuestionSuggestions.isNotEmpty) {
+      lines.addAll(event.nextQuestionSuggestions.take(3));
+    }
+    if (event.message.isNotEmpty) {
+      lines.add(event.message);
+    }
+    if (event.symptoms.isNotEmpty) {
+      lines.add('Symptoms: ${event.symptoms.take(3).join(', ')}');
+    }
+    if (event.riskSignals.isNotEmpty) {
+      lines.add('Risks: ${event.riskSignals.take(2).join(', ')}');
+    }
+    if (event.missingQuestions.isNotEmpty) {
+      lines.add('Ask now: ${event.missingQuestions.first}');
+    }
+    if (event.clinicalAssistantTasks.isNotEmpty) {
+      lines.add('Task: ${event.clinicalAssistantTasks.first}');
+    }
+    if (event.evidence.isNotEmpty) {
+      lines.add('Evidence: ${event.evidence}');
+    }
+    final text = lines.join('\n');
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -301,15 +338,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _symptomsController.text = _joinFacts(caseRecord.note.entities.symptoms);
     _durationController.text = _joinFacts(caseRecord.note.entities.duration);
     _severityController.text = _joinFacts(caseRecord.note.entities.severity);
-    _historyController.text = _joinFacts(caseRecord.note.entities.medicalHistory);
-    _medicationsController.text = _joinFacts(caseRecord.note.entities.medications);
+    _historyController.text = _joinFacts(
+      caseRecord.note.entities.medicalHistory,
+    );
+    _medicationsController.text = _joinFacts(
+      caseRecord.note.entities.medications,
+    );
     _allergiesController.text = _joinFacts(caseRecord.note.entities.allergies);
     _vitalsController.text = _joinFacts(caseRecord.note.entities.vitals);
     _feedbackController.text = caseRecord.clinicianFeedback;
     _amendReasonController.clear();
   }
 
-  String _joinFacts(List<ExtractedFact> facts) => facts.map((fact) => fact.value).join('\n');
+  String _joinFacts(List<ExtractedFact> facts) =>
+      facts.map((fact) => fact.value).join('\n');
 
   List<String> _splitLines(String value) {
     return value
@@ -338,6 +380,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
       });
       _lastNudgeId = null;
       _latestPatientAvs = null;
+      _latestTimelineSummary = null;
+      _latestRagValidation = null;
+      _latestFullValidation = null;
+      _latestCriticReview = null;
+      _latestDiagnosisConfidence = null;
+      _latestPatientFriendlySummary = null;
+      _latestPrescriptionDraft = null;
+      _runningValidationBatch = false;
+      _validationBatchStep = 0;
+      _validationBatchTotal = 0;
+      _validationBatchLabel = '';
       _syncDraftControllers(selectedCase);
       unawaited(_loadHistoryCitations(selectedCase));
       _showMessage('Opened ${selectedCase.patientLabel}');
@@ -363,9 +416,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (status == 'approved') {
         final postVisit = await _api.orchestratorPostVisit(caseRecord.caseId);
         if (!postVisit.signAllowed) {
-          final validationIssues = (postVisit.preSignValidation['issues'] as List<dynamic>? ?? const [])
-              .map((item) => item.toString())
-              .toList();
+          final validationIssues =
+              (postVisit.preSignValidation['issues'] as List<dynamic>? ??
+                      const [])
+                  .map((item) => item.toString())
+                  .toList();
           if (!mounted) return;
           setState(() {
             _submitting = false;
@@ -382,7 +437,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
             }
             final patient = postVisit.outputs['patient'];
             if (patient is Map) {
-              _latestPatientAvs = PatientAfterVisitSummary.fromJson(Map<String, dynamic>.from(patient));
+              _latestPatientAvs = PatientAfterVisitSummary.fromJson(
+                Map<String, dynamic>.from(patient),
+              );
             }
           });
           _showMessage('Sign blocked by orchestrator consistency checks.');
@@ -398,7 +455,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
       );
       final logs = await _api.fetchAuditLogs(caseRecord.caseId);
       final refreshedCases = await _api.fetchCases();
-      final refreshedSelected = refreshedCases.firstWhere((item) => item.caseId == updatedCase.caseId);
+      final refreshedSelected = refreshedCases.firstWhere(
+        (item) => item.caseId == updatedCase.caseId,
+      );
       if (!mounted) return;
       setState(() {
         _cases = refreshedCases;
@@ -407,7 +466,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _submitting = false;
       });
       _syncDraftControllers(refreshedSelected);
-      _showMessage(status == 'approved' ? 'Case approved' : 'Case sent back for changes');
+      _showMessage(
+        status == 'approved' ? 'Case approved' : 'Case sent back for changes',
+      );
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -445,7 +506,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
       );
       final logs = await _api.fetchAuditLogs(caseRecord.caseId);
       final refreshedCases = await _api.fetchCases();
-      final refreshedSelected = refreshedCases.firstWhere((item) => item.caseId == updatedCase.caseId);
+      final refreshedSelected = refreshedCases.firstWhere(
+        (item) => item.caseId == updatedCase.caseId,
+      );
       if (!mounted) return;
       setState(() {
         _cases = refreshedCases;
@@ -503,7 +566,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final postVisit = await _api.orchestratorPostVisit(caseRecord.caseId);
       final billingPayload = postVisit.outputs['billing'];
       if (billingPayload is! Map) {
-        throw Exception('Orchestrator post-visit did not return billing output.');
+        throw Exception(
+          'Orchestrator post-visit did not return billing output.',
+        );
       }
       if (!mounted) return;
       setState(() {
@@ -514,11 +579,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
         );
         final patientPayload = postVisit.outputs['patient'];
         if (patientPayload is Map) {
-          _latestPatientAvs = PatientAfterVisitSummary.fromJson(Map<String, dynamic>.from(patientPayload));
+          _latestPatientAvs = PatientAfterVisitSummary.fromJson(
+            Map<String, dynamic>.from(patientPayload),
+          );
         }
         _runningBillingAgent = false;
       });
-      _showMessage('Post-visit orchestrator finished (billing + patient summary).');
+      _showMessage(
+        'Post-visit orchestrator finished (billing + patient summary).',
+      );
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -526,6 +595,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _error = '$error';
       });
     }
+  }
+
+  Future<void> _runScribeAgent() async {
+    final caseRecord = _caseRecord;
+    if (caseRecord == null) return;
+    await _runAgent(() => _api.runScribeAgent(caseRecord.caseId));
+  }
+
+  Future<void> _runPatientCommunicatorAgent() async {
+    final caseRecord = _caseRecord;
+    if (caseRecord == null) return;
+    await _runAgent(() => _api.runPatientCommunicatorAgent(caseRecord.caseId));
   }
 
   Future<void> _runVisionAgent(String mediaType) async {
@@ -538,17 +619,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
     XFile? selected;
     try {
       if (mediaType == 'video') {
-        selected = await _imagePicker.pickVideo(source: source, maxDuration: const Duration(seconds: 20));
+        selected = await _imagePicker.pickVideo(
+          source: source,
+          maxDuration: const Duration(seconds: 20),
+        );
       } else {
-        selected = await _imagePicker.pickImage(source: source, imageQuality: 85);
+        selected = await _imagePicker.pickImage(
+          source: source,
+          imageQuality: 85,
+        );
       }
     } on PlatformException catch (e) {
       if (!mounted) return;
-      _showMessage('Media access denied: ${e.message ?? e.code}. Check app permissions.');
+      _showMessage(
+        'Media access denied: ${e.message ?? e.code}. Check app permissions.',
+      );
       return;
     } catch (_) {
       if (!mounted) return;
-      _showMessage('Could not open media picker. Try using the photo library option.');
+      _showMessage(
+        'Could not open media picker. Try using the photo library option.',
+      );
       return;
     }
 
@@ -559,7 +650,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _error = null;
     });
     try {
-      final response = await _api.analyzeVisionMedia(mediaPath: selected.path, mediaType: mediaType);
+      final response = await _api.analyzeVisionMedia(
+        mediaPath: selected.path,
+        mediaType: mediaType,
+      );
       if (!mounted) return;
       setState(() {
         _latestVisionObjective = response;
@@ -569,10 +663,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final injected = response.objectiveText.trim();
       final currentObjective = _objectiveController.text.trim();
       if (injected.isNotEmpty && !currentObjective.contains(injected)) {
-        _objectiveController.text = currentObjective.isEmpty ? injected : '$currentObjective\n$injected';
+        _objectiveController.text = currentObjective.isEmpty
+            ? injected
+            : '$currentObjective\n$injected';
       }
       _openWorkspace(WorkspaceView.noteStudio);
-      _showMessage('Objective auto-injected from ${mediaType == 'video' ? 'gait video' : 'wound image'}.');
+      _showMessage(
+        'Objective auto-injected from ${mediaType == 'video' ? 'gait video' : 'wound image'}.',
+      );
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -619,7 +717,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
               leading: const Icon(Icons.camera_alt_outlined),
               title: const Text('Camera'),
               subtitle: const Text('Use device camera to capture live'),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+              ),
               tileColor: Colors.white.withValues(alpha: 0.72),
               onTap: () => Navigator.of(ctx).pop(ImageSource.camera),
             ),
@@ -628,7 +728,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
               leading: const Icon(Icons.photo_library_outlined),
               title: const Text('Photo library'),
               subtitle: const Text('Pick existing media from device gallery'),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+              ),
               tileColor: Colors.white.withValues(alpha: 0.72),
               onTap: () => Navigator.of(ctx).pop(ImageSource.gallery),
             ),
@@ -650,9 +752,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final postVisit = await _api.orchestratorPostVisit(caseRecord.caseId);
       final patientPayload = postVisit.outputs['patient'];
       if (patientPayload is! Map) {
-        throw Exception('Orchestrator post-visit did not return patient summary output.');
+        throw Exception(
+          'Orchestrator post-visit did not return patient summary output.',
+        );
       }
-      final avs = PatientAfterVisitSummary.fromJson(Map<String, dynamic>.from(patientPayload));
+      final avs = PatientAfterVisitSummary.fromJson(
+        Map<String, dynamic>.from(patientPayload),
+      );
       if (!mounted) return;
       setState(() {
         _latestPatientAvs = avs;
@@ -674,6 +780,398 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _generatingPatientAvs = false;
         _error = '$error';
       });
+    }
+  }
+
+  List<Map<String, dynamic>> _retrievedDocsPayload() {
+    final items = _historyDebug?.retrieved ?? const <RetrievedHistoryItem>[];
+    return items
+        .map(
+          (item) => {
+            'visit_id': item.visitId,
+            'date': item.date,
+            'score': item.score,
+            'source': item.source,
+            'text_chunk': item.textChunk,
+          },
+        )
+        .toList();
+  }
+
+  dynamic _diagnosisPayloadForValidation(CaseRecord caseRecord) {
+    if (caseRecord.note.differentialDiagnosis.isNotEmpty) {
+      return caseRecord.note.differentialDiagnosis
+          .map(
+            (item) => {
+              'condition': item.condition,
+              'rationale': item.rationale,
+              'confidence': item.confidence,
+            },
+          )
+          .toList();
+    }
+    return {'assessment_text': caseRecord.note.soapNote.assessment.text};
+  }
+
+  Map<String, dynamic> _fullOutputPayload(CaseRecord caseRecord) {
+    return {
+      'case_id': caseRecord.caseId,
+      'summary': caseRecord.note.summary,
+      'entities': {
+        'symptoms': caseRecord.note.entities.symptoms
+            .map((item) => item.value)
+            .toList(),
+        'duration': caseRecord.note.entities.duration
+            .map((item) => item.value)
+            .toList(),
+        'severity': caseRecord.note.entities.severity
+            .map((item) => item.value)
+            .toList(),
+        'history': caseRecord.note.entities.medicalHistory
+            .map((item) => item.value)
+            .toList(),
+        'medications': caseRecord.note.entities.medications
+            .map((item) => item.value)
+            .toList(),
+        'allergies': caseRecord.note.entities.allergies
+            .map((item) => item.value)
+            .toList(),
+        'vitals': caseRecord.note.entities.vitals
+            .map((item) => item.value)
+            .toList(),
+      },
+      'soap_note': {
+        'subjective': caseRecord.note.soapNote.subjective.text,
+        'objective': caseRecord.note.soapNote.objective.text,
+        'assessment': caseRecord.note.soapNote.assessment.text,
+        'plan': caseRecord.note.soapNote.plan.text,
+      },
+      'differential_diagnosis': caseRecord.note.differentialDiagnosis
+          .map(
+            (item) => {
+              'condition': item.condition,
+              'rationale': item.rationale,
+              'confidence': item.confidence,
+            },
+          )
+          .toList(),
+    };
+  }
+
+  Map<String, dynamic> _soapPayload(CaseRecord caseRecord) {
+    return {
+      'subjective': caseRecord.note.soapNote.subjective.text,
+      'objective': caseRecord.note.soapNote.objective.text,
+      'assessment': caseRecord.note.soapNote.assessment.text,
+      'plan': caseRecord.note.soapNote.plan.text,
+    };
+  }
+
+  Map<String, dynamic> _treatmentPayload(CaseRecord caseRecord) {
+    final planText = caseRecord.note.soapNote.plan.text;
+    return {
+      'medications': _splitLines(planText),
+      'tests': const <String>[],
+      'advice': const <String>[],
+      'follow_up': 'unknown',
+      'warning': 'Doctor validation required',
+    };
+  }
+
+  Future<void> _runTimelineSummaryEngine() async {
+    setState(() {
+      _runningValidationEngines = true;
+      _error = null;
+    });
+    try {
+      final summary = await _api.summarizePatientTimeline(
+        _retrievedDocsPayload(),
+      );
+      if (!mounted) return;
+      setState(() {
+        _latestTimelineSummary = summary;
+        _runningValidationEngines = false;
+      });
+      _showMessage('Patient timeline summary generated.');
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _runningValidationEngines = false;
+        _error = '$error';
+      });
+    }
+  }
+
+  Future<void> _runRagValidationEngine() async {
+    final caseRecord = _caseRecord;
+    if (caseRecord == null) return;
+    setState(() {
+      _runningValidationEngines = true;
+      _error = null;
+    });
+    try {
+      final result = await _api.ragValidateDiagnosis(
+        diagnosis: _diagnosisPayloadForValidation(caseRecord),
+        context: _retrievedDocsPayload(),
+      );
+      if (!mounted) return;
+      setState(() {
+        _latestRagValidation = result;
+        _runningValidationEngines = false;
+      });
+      _showMessage('RAG diagnosis validation completed.');
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _runningValidationEngines = false;
+        _error = '$error';
+      });
+    }
+  }
+
+  Future<void> _runFullOutputValidationEngine() async {
+    final caseRecord = _caseRecord;
+    if (caseRecord == null) return;
+    setState(() {
+      _runningValidationEngines = true;
+      _error = null;
+    });
+    try {
+      final result = await _api.validateFullOutput(
+        _fullOutputPayload(caseRecord),
+      );
+      if (!mounted) return;
+      setState(() {
+        _latestFullValidation = result;
+        _runningValidationEngines = false;
+      });
+      _showMessage('Full output validation finished.');
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _runningValidationEngines = false;
+        _error = '$error';
+      });
+    }
+  }
+
+  Future<void> _runCriticEngine() async {
+    final caseRecord = _caseRecord;
+    if (caseRecord == null) return;
+    setState(() {
+      _runningValidationEngines = true;
+      _error = null;
+    });
+    try {
+      final output = {
+        'diagnosis': _diagnosisPayloadForValidation(caseRecord),
+        'treatment': {'plan_text': caseRecord.note.soapNote.plan.text},
+      };
+      final result = await _api.criticReview(output);
+      if (!mounted) return;
+      setState(() {
+        _latestCriticReview = result;
+        _runningValidationEngines = false;
+      });
+      _showMessage('Critic review completed.');
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _runningValidationEngines = false;
+        _error = '$error';
+      });
+    }
+  }
+
+  Future<void> _runDiagnosisConfidenceEngine() async {
+    final caseRecord = _caseRecord;
+    if (caseRecord == null) return;
+    setState(() {
+      _runningValidationEngines = true;
+      _error = null;
+    });
+    try {
+      final result = await _api.scoreDiagnosisConfidence(
+        _diagnosisPayloadForValidation(caseRecord),
+      );
+      if (!mounted) return;
+      setState(() {
+        _latestDiagnosisConfidence = result;
+        _runningValidationEngines = false;
+      });
+      _showMessage('Diagnosis confidence scoring completed.');
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _runningValidationEngines = false;
+        _error = '$error';
+      });
+    }
+  }
+
+  Future<void> _runPatientFriendlySummaryEngine() async {
+    final caseRecord = _caseRecord;
+    if (caseRecord == null) return;
+    setState(() {
+      _runningValidationEngines = true;
+      _error = null;
+    });
+    try {
+      final result = await _api.generatePatientFriendlySummary(
+        _soapPayload(caseRecord),
+      );
+      if (!mounted) return;
+      setState(() {
+        _latestPatientFriendlySummary = result;
+        _runningValidationEngines = false;
+      });
+      _showMessage('Patient-friendly summary generated.');
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _runningValidationEngines = false;
+        _error = '$error';
+      });
+    }
+  }
+
+  Future<void> _runPrescriptionGeneratorEngine() async {
+    final caseRecord = _caseRecord;
+    if (caseRecord == null) return;
+    setState(() {
+      _runningValidationEngines = true;
+      _error = null;
+    });
+    try {
+      final result = await _api.generatePrescriptionDraft(
+        _treatmentPayload(caseRecord),
+      );
+      if (!mounted) return;
+      setState(() {
+        _latestPrescriptionDraft = result;
+        _runningValidationEngines = false;
+      });
+      _showMessage('Prescription draft generated.');
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _runningValidationEngines = false;
+        _error = '$error';
+      });
+    }
+  }
+
+  bool get _hasValidationResults {
+    return _latestTimelineSummary != null ||
+        _latestRagValidation != null ||
+        _latestFullValidation != null ||
+        _latestCriticReview != null ||
+        _latestDiagnosisConfidence != null ||
+        _latestPatientFriendlySummary != null ||
+        _latestPrescriptionDraft != null;
+  }
+
+  void _clearValidationResults() {
+    setState(() {
+      _latestTimelineSummary = null;
+      _latestRagValidation = null;
+      _latestFullValidation = null;
+      _latestCriticReview = null;
+      _latestDiagnosisConfidence = null;
+      _latestPatientFriendlySummary = null;
+      _latestPrescriptionDraft = null;
+    });
+    _showMessage('Validation results cleared.');
+  }
+
+  Future<void> _runAllValidationEngines() async {
+    final caseRecord = _caseRecord;
+    if (caseRecord == null) return;
+
+    final failures = <String>[];
+    final total = 7;
+
+    Future<void> runStep(String label, Future<void> Function() action) async {
+      if (!mounted) return;
+      setState(() {
+        _validationBatchStep += 1;
+        _validationBatchLabel = label;
+      });
+      try {
+        await action();
+      } catch (_) {
+        failures.add(label);
+      }
+    }
+
+    setState(() {
+      _runningValidationEngines = true;
+      _runningValidationBatch = true;
+      _validationBatchStep = 0;
+      _validationBatchTotal = total;
+      _validationBatchLabel = 'Preparing checks';
+      _error = null;
+    });
+
+    try {
+      await runStep('Timeline summary', () async {
+        _latestTimelineSummary = await _api.summarizePatientTimeline(
+          _retrievedDocsPayload(),
+        );
+      });
+
+      await runStep('RAG diagnosis validation', () async {
+        _latestRagValidation = await _api.ragValidateDiagnosis(
+          diagnosis: _diagnosisPayloadForValidation(caseRecord),
+          context: _retrievedDocsPayload(),
+        );
+      });
+
+      await runStep('Full output validation', () async {
+        _latestFullValidation = await _api.validateFullOutput(
+          _fullOutputPayload(caseRecord),
+        );
+      });
+
+      await runStep('Critic review', () async {
+        final output = {
+          'diagnosis': _diagnosisPayloadForValidation(caseRecord),
+          'treatment': {'plan_text': caseRecord.note.soapNote.plan.text},
+        };
+        _latestCriticReview = await _api.criticReview(output);
+      });
+
+      await runStep('Diagnosis confidence score', () async {
+        _latestDiagnosisConfidence = await _api.scoreDiagnosisConfidence(
+          _diagnosisPayloadForValidation(caseRecord),
+        );
+      });
+
+      await runStep('Patient-friendly summary', () async {
+        _latestPatientFriendlySummary = await _api
+            .generatePatientFriendlySummary(_soapPayload(caseRecord));
+      });
+
+      await runStep('Prescription draft', () async {
+        _latestPrescriptionDraft = await _api.generatePrescriptionDraft(
+          _treatmentPayload(caseRecord),
+        );
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _runningValidationEngines = false;
+          _runningValidationBatch = false;
+          if (failures.isNotEmpty) {
+            _error = 'Failed checks: ${failures.join(', ')}';
+          }
+        });
+        if (failures.isEmpty) {
+          _showMessage('All checks completed.');
+        } else {
+          _showMessage('Completed with ${failures.length} failed check(s).');
+        }
+      }
     }
   }
 
@@ -702,7 +1200,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _showMessage(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _showCaseQueueSheet() async {
@@ -793,11 +1293,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   void _handleSafetyIssueTap(SafetyIssue issue) {
     final normalized = issue.issue.toLowerCase();
-    if (normalized.contains('vital') || normalized.contains('allerg') || normalized.contains('medication')) {
+    if (normalized.contains('vital') ||
+        normalized.contains('allerg') ||
+        normalized.contains('medication')) {
       _openWorkspace(WorkspaceView.noteStudio, focusKey: _entitiesKey);
       return;
     }
-    if (normalized.contains('objective') || normalized.contains('assessment') || normalized.contains('plan')) {
+    if (normalized.contains('objective') ||
+        normalized.contains('assessment') ||
+        normalized.contains('plan')) {
       _openWorkspace(WorkspaceView.noteStudio, focusKey: _noteEditorKey);
       return;
     }
@@ -810,26 +1314,30 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   int _countCasesByStatus(String status) {
-    return _cases.where((caseRecord) => caseRecord.reviewStatus == status).length;
+    return _cases
+        .where((caseRecord) => caseRecord.reviewStatus == status)
+        .length;
   }
 
   int _countCriticalCases() {
     return _cases.where((caseRecord) {
-      return caseRecord.note.reviewFlags.any((flag) => flag.severity == 'critical');
+      return caseRecord.note.reviewFlags.any(
+        (flag) => flag.severity == 'critical',
+      );
     }).length;
   }
 
   List<CaseRecord> get _visibleCases {
     final query = _searchController.text.trim().toLowerCase();
     return _cases.where((caseRecord) {
-      if (_queueFilter != 'all' && caseRecord.reviewStatus != _queueFilter) {
-        return false;
-      }
-      if (query.isEmpty) return true;
-      return caseRecord.patientLabel.toLowerCase().contains(query) ||
-          caseRecord.caseId.toLowerCase().contains(query) ||
-          caseRecord.note.summary.toLowerCase().contains(query);
-    }).toList()
+        if (_queueFilter != 'all' && caseRecord.reviewStatus != _queueFilter) {
+          return false;
+        }
+        if (query.isEmpty) return true;
+        return caseRecord.patientLabel.toLowerCase().contains(query) ||
+            caseRecord.caseId.toLowerCase().contains(query) ||
+            caseRecord.note.summary.toLowerCase().contains(query);
+      }).toList()
       ..sort((left, right) => right.updatedAt.compareTo(left.updatedAt));
   }
 
@@ -922,7 +1430,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _loadingOfflineReadiness = false;
       });
       if (prepull) {
-        _showMessage(status.ready ? 'Offline readiness checks passed.' : 'Offline readiness still has failing checks.');
+        _showMessage(
+          status.ready
+              ? 'Offline readiness checks passed.'
+              : 'Offline readiness still has failing checks.',
+        );
       }
     } catch (error) {
       if (!mounted) return;
@@ -1019,7 +1531,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         switchInCurve: Curves.easeOutCubic,
                         switchOutCurve: Curves.easeInCubic,
                         child: KeyedSubtree(
-                          key: ValueKey('workspace-pane-${_workspaceView.name}'),
+                          key: ValueKey(
+                            'workspace-pane-${_workspaceView.name}',
+                          ),
                           child: _buildWorkspace(context, caseRecord),
                         ),
                       ),
@@ -1065,14 +1579,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   });
                   _openWorkspace(WorkspaceView.overview);
                 },
-                onTapCritical: () => _openWorkspace(WorkspaceView.overview, focusKey: _flagsKey),
+                onTapCritical: () =>
+                    _openWorkspace(WorkspaceView.overview, focusKey: _flagsKey),
               ),
               const SizedBox(height: 18),
               _CasePulseRow(
                 caseRecord: caseRecord,
-                onTapStatus: () => _openWorkspace(WorkspaceView.overview, focusKey: _reviewPanelKey),
-                onTapFlags: () => _openWorkspace(WorkspaceView.overview, focusKey: _flagsKey),
-                onTapDifferentials: () => _openWorkspace(WorkspaceView.overview, focusKey: _flagsKey),
+                onTapStatus: () => _openWorkspace(
+                  WorkspaceView.overview,
+                  focusKey: _reviewPanelKey,
+                ),
+                onTapFlags: () =>
+                    _openWorkspace(WorkspaceView.overview, focusKey: _flagsKey),
+                onTapDifferentials: () =>
+                    _openWorkspace(WorkspaceView.overview, focusKey: _flagsKey),
               ),
               const SizedBox(height: 16),
               if (!isMobile) ...[
@@ -1093,8 +1613,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
               _Panel(
                 key: _transcriptKey,
                 title: 'Visit transcript',
-                subtitle: 'Clinician conversation remains the source of truth for every generated field.',
-                child: SelectableText(caseRecord.transcript, style: Theme.of(context).textTheme.bodyLarge),
+                subtitle:
+                    'Clinician conversation remains the source of truth for every generated field.',
+                child: SelectableText(
+                  caseRecord.transcript,
+                  style: Theme.of(context).textTheme.bodyLarge,
+                ),
               ),
               const SizedBox(height: 16),
               _Panel(
@@ -1104,16 +1628,34 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(caseRecord.note.summary, style: Theme.of(context).textTheme.bodyLarge),
+                    Text(
+                      caseRecord.note.summary,
+                      style: Theme.of(context).textTheme.bodyLarge,
+                    ),
                     const SizedBox(height: 16),
                     Wrap(
                       spacing: 10,
                       runSpacing: 10,
                       children: [
-                        _QuickFact(label: 'Symptoms', value: '${caseRecord.note.entities.symptoms.length} captured'),
-                        _QuickFact(label: 'Allergies', value: '${caseRecord.note.entities.allergies.length} documented'),
-                        _QuickFact(label: 'Vitals', value: '${caseRecord.note.entities.vitals.length} documented'),
-                        _QuickFact(label: 'Audit events', value: '${_auditLogs.length} recorded'),
+                        _QuickFact(
+                          label: 'Symptoms',
+                          value:
+                              '${caseRecord.note.entities.symptoms.length} captured',
+                        ),
+                        _QuickFact(
+                          label: 'Allergies',
+                          value:
+                              '${caseRecord.note.entities.allergies.length} documented',
+                        ),
+                        _QuickFact(
+                          label: 'Vitals',
+                          value:
+                              '${caseRecord.note.entities.vitals.length} documented',
+                        ),
+                        _QuickFact(
+                          label: 'Audit events',
+                          value: '${_auditLogs.length} recorded',
+                        ),
                       ],
                     ),
                   ],
@@ -1122,7 +1664,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
               const SizedBox(height: 16),
               _Panel(
                 title: 'Retrieval citations',
-                subtitle: 'Hybrid retrieval evidence used for longitudinal context with visit/date/source/score traceability.',
+                subtitle:
+                    'Hybrid retrieval evidence used for longitudinal context with visit/date/source/score traceability.',
                 accent: const Color(0xFF3A5F4D),
                 child: _RetrievalCitationsPanel(
                   loading: _loadingHistory,
@@ -1134,7 +1677,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
               const SizedBox(height: 16),
               _Panel(
                 title: 'Sovereign readiness',
-                subtitle: 'Quick admin checks for model cache, local LLM reachability, and database mode.',
+                subtitle:
+                    'Quick admin checks for model cache, local LLM reachability, and database mode.',
                 accent: const Color(0xFF2B4158),
                 child: _OfflineReadinessTile(
                   status: _offlineReadiness,
@@ -1146,7 +1690,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
               const SizedBox(height: 16),
               _Panel(
                 title: 'Revenue leakage detector',
-                subtitle: 'Find billable CPT and ICD-10 opportunities missing from summary capture.',
+                subtitle:
+                    'Find billable CPT and ICD-10 opportunities missing from summary capture.',
                 accent: const Color(0xFF6E4E2E),
                 child: _BillingLeakageCard(
                   running: _runningBillingAgent,
@@ -1158,7 +1703,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
               _Panel(
                 key: _flagsKey,
                 title: 'Safety and reasoning',
-                subtitle: 'Use agent findings and generated differentials to decide what needs review attention.',
+                subtitle:
+                    'Use agent findings and generated differentials to decide what needs review attention.',
                 accent: const Color(0xFFC96F4A),
                 child: _FlagsAndDiagnosisPanel(
                   flags: caseRecord.note.reviewFlags,
@@ -1176,8 +1722,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 runningAgent: _runningAgent,
                 onApprove: () => _submitReview('approved'),
                 onRequestChanges: () => _submitReview('needs_changes'),
-                onOpenTranscript: () => _openWorkspace(WorkspaceView.overview, focusKey: _transcriptKey),
-                onOpenFlags: () => _openWorkspace(WorkspaceView.overview, focusKey: _flagsKey),
+                onOpenTranscript: () => _openWorkspace(
+                  WorkspaceView.overview,
+                  focusKey: _transcriptKey,
+                ),
+                onOpenFlags: () =>
+                    _openWorkspace(WorkspaceView.overview, focusKey: _flagsKey),
                 onOpenEditor: () => _openWorkspace(WorkspaceView.noteStudio),
                 onOpenAudit: () => _openWorkspace(WorkspaceView.audit),
                 onRunSafety: _runSafetyAgent,
@@ -1198,7 +1748,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
             _Panel(
               key: _noteEditorKey,
               title: 'Note studio',
-              subtitle: 'Edit the clinician-facing summary and SOAP sections before sign-off.',
+              subtitle:
+                  'Edit the clinician-facing summary and SOAP sections before sign-off.',
               accent: const Color(0xFF244553),
               child: _EditableNotePanel(
                 disclaimer: caseRecord.note.disclaimer,
@@ -1215,7 +1766,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
             const SizedBox(height: 16),
             _Panel(
               title: 'Multi-modal Objective Assist',
-              subtitle: 'Capture wound photos or gait videos and auto-inject objective findings.',
+              subtitle:
+                  'Capture wound photos or gait videos and auto-inject objective findings.',
               accent: const Color(0xFF2F5D50),
               child: _VisionAssistPanel(
                 running: _analyzingVision,
@@ -1227,7 +1779,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
             const SizedBox(height: 16),
             _Panel(
               title: 'Patient-Facing Plain Language AVS',
-              subtitle: 'Generate a friendly after-visit summary patients can understand quickly.',
+              subtitle:
+                  'Generate a friendly after-visit summary patients can understand quickly.',
               accent: const Color(0xFF5E4B8A),
               child: _PatientAvsPanel(
                 running: _generatingPatientAvs,
@@ -1250,7 +1803,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     '',
                     avs.disclaimer,
                   ];
-                  await Clipboard.setData(ClipboardData(text: lines.join('\n')));
+                  await Clipboard.setData(
+                    ClipboardData(text: lines.join('\n')),
+                  );
                   if (!mounted) return;
                   _showMessage('AVS copied to clipboard');
                 },
@@ -1260,7 +1815,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
             _Panel(
               key: _entitiesKey,
               title: 'Structured entities',
-              subtitle: 'Correct extracted symptoms, history, medications, allergies, and vitals.',
+              subtitle:
+                  'Correct extracted symptoms, history, medications, allergies, and vitals.',
               accent: const Color(0xFF1D6A72),
               child: _EntityEditorPanel(
                 symptomsController: _symptomsController,
@@ -1282,21 +1838,29 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 children: [
                   TextField(
                     controller: _reviewerController,
-                    decoration: const InputDecoration(labelText: 'Reviewer name'),
+                    decoration: const InputDecoration(
+                      labelText: 'Reviewer name',
+                    ),
                   ),
                   const SizedBox(height: 12),
                   TextField(
                     controller: _feedbackController,
                     maxLines: 4,
-                    decoration: const InputDecoration(labelText: 'Review feedback'),
+                    decoration: const InputDecoration(
+                      labelText: 'Review feedback',
+                    ),
                   ),
                   const SizedBox(height: 16),
                   Row(
                     children: [
                       Expanded(
                         child: FilledButton(
-                          onPressed: _submitting ? null : () => _submitReview('approved'),
-                          child: Text(_submitting ? 'Saving...' : 'Approve note'),
+                          onPressed: _submitting
+                              ? null
+                              : () => _submitReview('approved'),
+                          child: Text(
+                            _submitting ? 'Saving...' : 'Approve note',
+                          ),
                         ),
                       ),
                     ],
@@ -1306,7 +1870,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     children: [
                       Expanded(
                         child: OutlinedButton(
-                          onPressed: _submitting ? null : () => _submitReview('needs_changes'),
+                          onPressed: _submitting
+                              ? null
+                              : () => _submitReview('needs_changes'),
                           child: const Text('Request changes'),
                         ),
                       ),
@@ -1324,16 +1890,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
             _Panel(
               key: _agentsKey,
               title: 'Agent command center',
-              subtitle: 'Run intake, safety, and queue agents, then turn their output into actions.',
+              subtitle:
+                  'Run any of the 6 clinical agents, then act on their output.',
               accent: const Color(0xFF12212B),
               child: _AgentPanel(
                 agents: _agents,
                 agentTranscriptController: _agentTranscriptController,
                 runningAgent: _runningAgent,
+                runningBillingAgent: _runningBillingAgent,
                 latestResponse: _latestAgentResponse,
+                latestBillingResponse: _latestBillingResponse,
                 onRunSafety: _runSafetyAgent,
                 onRunQueue: _runQueueAgent,
                 onRunIntake: _runIntakeAgent,
+                onRunScribe: _runScribeAgent,
+                onRunPatientComm: _runPatientCommunicatorAgent,
+                onRunBilling: _runBillingAgent,
                 onSelectQueueCase: _handleQueueCaseTap,
                 onOpenSafetyIssue: _handleSafetyIssueTap,
                 onOpenCreatedCase: _handleQueueCaseTap,
@@ -1341,13 +1913,299 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ),
             const SizedBox(height: 16),
             _Panel(
+              title: 'Validation and critique engines',
+              subtitle:
+                  'Cross-check diagnosis quality and flag unsupported reasoning before sign-off.',
+              accent: const Color(0xFF654321),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: [
+                      FilledButton.icon(
+                        onPressed: _runningValidationEngines
+                            ? null
+                            : _runAllValidationEngines,
+                        icon: _runningValidationEngines
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Icon(
+                                Icons.playlist_add_check_circle_outlined,
+                              ),
+                        label: const Text('Run all checks'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: _hasValidationResults
+                            ? _clearValidationResults
+                            : null,
+                        icon: const Icon(Icons.cleaning_services_outlined),
+                        label: const Text('Clear results'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  if (_runningValidationBatch) ...[
+                    _ValidationResultCard(
+                      title: 'Running checks',
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Step $_validationBatchStep/$_validationBatchTotal: $_validationBatchLabel',
+                          ),
+                          const SizedBox(height: 8),
+                          LinearProgressIndicator(
+                            value: _validationBatchTotal == 0
+                                ? null
+                                : _validationBatchStep / _validationBatchTotal,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                  ],
+                  ExpansionTile(
+                    title: const Text('Individual tools'),
+                    subtitle: const Text('Run only the checks you need'),
+                    childrenPadding: const EdgeInsets.only(top: 8),
+                    children: [
+                      Wrap(
+                        spacing: 10,
+                        runSpacing: 10,
+                        children: [
+                          FilledButton.tonalIcon(
+                            onPressed: _runningValidationEngines
+                                ? null
+                                : _runTimelineSummaryEngine,
+                            icon: const Icon(Icons.timeline_outlined),
+                            label: const Text('Timeline'),
+                          ),
+                          FilledButton.tonalIcon(
+                            onPressed: _runningValidationEngines
+                                ? null
+                                : _runRagValidationEngine,
+                            icon: const Icon(Icons.fact_check_outlined),
+                            label: const Text('RAG validate'),
+                          ),
+                          FilledButton.tonalIcon(
+                            onPressed: _runningValidationEngines
+                                ? null
+                                : _runFullOutputValidationEngine,
+                            icon: const Icon(Icons.verified_outlined),
+                            label: const Text('Full output'),
+                          ),
+                          FilledButton.tonalIcon(
+                            onPressed: _runningValidationEngines
+                                ? null
+                                : _runCriticEngine,
+                            icon: const Icon(Icons.rate_review_outlined),
+                            label: const Text('Critic'),
+                          ),
+                          FilledButton.tonalIcon(
+                            onPressed: _runningValidationEngines
+                                ? null
+                                : _runDiagnosisConfidenceEngine,
+                            icon: const Icon(Icons.insights_outlined),
+                            label: const Text('Confidence'),
+                          ),
+                          FilledButton.tonalIcon(
+                            onPressed: _runningValidationEngines
+                                ? null
+                                : _runPatientFriendlySummaryEngine,
+                            icon: const Icon(Icons.accessible_forward_outlined),
+                            label: const Text('Patient summary'),
+                          ),
+                          FilledButton.tonalIcon(
+                            onPressed: _runningValidationEngines
+                                ? null
+                                : _runPrescriptionGeneratorEngine,
+                            icon: const Icon(Icons.medication_outlined),
+                            label: const Text('Prescription'),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  if (_latestTimelineSummary != null) ...[
+                    _ValidationResultCard(
+                      title: 'Timeline summary',
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(_latestTimelineSummary!.trendSummary),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Chronic conditions: ${_latestTimelineSummary!.chronicConditions.join(', ')}',
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Recurring symptoms: ${_latestTimelineSummary!.recurringSymptoms.join(', ')}',
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Medication history: ${_latestTimelineSummary!.medicationHistory.join(', ')}',
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                  ],
+                  if (_latestRagValidation != null) ...[
+                    _ValidationResultCard(
+                      title: 'RAG diagnosis validation',
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _latestRagValidation!.supported
+                                ? 'Supported (${_latestRagValidation!.confidence})'
+                                : 'Not supported (${_latestRagValidation!.confidence})',
+                          ),
+                          const SizedBox(height: 4),
+                          Text(_latestRagValidation!.evidence),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                  ],
+                  if (_latestFullValidation != null) ...[
+                    _ValidationResultCard(
+                      title: 'Full output validation',
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _latestFullValidation!.valid
+                                ? 'Output valid (${_latestFullValidation!.severity} severity)'
+                                : 'Output needs review (${_latestFullValidation!.severity} severity)',
+                          ),
+                          const SizedBox(height: 4),
+                          if (_latestFullValidation!.issues.isEmpty)
+                            const Text('No issues reported.')
+                          else
+                            ..._latestFullValidation!.issues
+                                .take(4)
+                                .map((issue) => Text('- $issue')),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                  ],
+                  if (_latestCriticReview != null) ...[
+                    _ValidationResultCard(
+                      title: 'Critic review',
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Verdict: ${_latestCriticReview!.finalVerdict}'),
+                          const SizedBox(height: 6),
+                          if (_latestCriticReview!.errors.isNotEmpty) ...[
+                            const Text('Errors:'),
+                            ..._latestCriticReview!.errors
+                                .take(3)
+                                .map((item) => Text('- $item')),
+                            const SizedBox(height: 6),
+                          ],
+                          if (_latestCriticReview!.improvements.isNotEmpty) ...[
+                            const Text('Improvements:'),
+                            ..._latestCriticReview!.improvements
+                                .take(3)
+                                .map((item) => Text('- $item')),
+                          ],
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                  ],
+                  if (_latestDiagnosisConfidence != null) ...[
+                    _ValidationResultCard(
+                      title: 'Diagnosis confidence score',
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Score: ${_latestDiagnosisConfidence!.score}/100',
+                          ),
+                          const SizedBox(height: 4),
+                          Text(_latestDiagnosisConfidence!.reason),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                  ],
+                  if (_latestPatientFriendlySummary != null) ...[
+                    _ValidationResultCard(
+                      title: 'Patient-friendly summary',
+                      child: Text(_latestPatientFriendlySummary!.summary),
+                    ),
+                    const SizedBox(height: 14),
+                  ],
+                  if (_latestPrescriptionDraft != null) ...[
+                    _ValidationResultCard(
+                      title: 'Prescription draft',
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (_latestPrescriptionDraft!
+                              .medications
+                              .isNotEmpty) ...[
+                            const Text('Medications:'),
+                            ..._latestPrescriptionDraft!.medications
+                                .take(4)
+                                .map((item) => Text('- $item')),
+                            const SizedBox(height: 6),
+                          ],
+                          if (_latestPrescriptionDraft!.dosage.isNotEmpty) ...[
+                            const Text('Dosage:'),
+                            ..._latestPrescriptionDraft!.dosage
+                                .take(4)
+                                .map((item) => Text('- $item')),
+                            const SizedBox(height: 6),
+                          ],
+                          if (_latestPrescriptionDraft!
+                              .instructions
+                              .isNotEmpty) ...[
+                            const Text('Instructions:'),
+                            ..._latestPrescriptionDraft!.instructions
+                                .take(4)
+                                .map((item) => Text('- $item')),
+                            const SizedBox(height: 6),
+                          ],
+                          Text('Notes: ${_latestPrescriptionDraft!.notes}'),
+                        ],
+                      ),
+                    ),
+                  ],
+                  if (!_hasValidationResults)
+                    const _EmptyState(
+                      message:
+                          'Run any validation, confidence, summary, or prescription engine to populate results.',
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            _Panel(
               title: 'Current chart context',
-              subtitle: 'Keep the selected chart visible while you run background agents.',
+              subtitle:
+                  'Keep the selected chart visible while you run background agents.',
               accent: const Color(0xFF1D6A72),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(caseRecord.patientLabel, style: Theme.of(context).textTheme.titleLarge),
+                  Text(
+                    caseRecord.patientLabel,
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
                   const SizedBox(height: 8),
                   Text(caseRecord.note.summary),
                 ],
@@ -1362,7 +2220,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
             _Panel(
               key: _auditKey,
               title: 'Audit timeline',
-              subtitle: 'Every note amendment, review decision, and agent-assisted handoff stays visible.',
+              subtitle:
+                  'Every note amendment, review decision, and agent-assisted handoff stays visible.',
               accent: const Color(0xFF75513B),
               child: _AuditPanel(auditLogs: _auditLogs),
             ),
@@ -1388,7 +2247,10 @@ class _BillingLeakageCard extends StatelessWidget {
     if (result == null) return const [];
     final dynamic values = result[key];
     if (values is! List) return const [];
-    return values.whereType<Map>().map((item) => Map<String, dynamic>.from(item)).toList();
+    return values
+        .whereType<Map>()
+        .map((item) => Map<String, dynamic>.from(item))
+        .toList();
   }
 
   @override
@@ -1412,7 +2274,11 @@ class _BillingLeakageCard extends StatelessWidget {
             FilledButton.tonalIcon(
               onPressed: running ? null : onRun,
               icon: running
-                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
                   : const Icon(Icons.attach_money_outlined),
               label: Text(running ? 'Scanning...' : 'Run detector'),
             ),
@@ -1443,6 +2309,34 @@ class _BillingLeakageCard extends StatelessWidget {
           const SizedBox(height: 10),
         ],
       ],
+    );
+  }
+}
+
+class _ValidationResultCard extends StatelessWidget {
+  const _ValidationResultCard({required this.title, required this.child});
+
+  final String title;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.72),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.black.withValues(alpha: 0.06)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          child,
+        ],
+      ),
     );
   }
 }
@@ -1485,7 +2379,11 @@ class _OfflineReadinessTile extends StatelessWidget {
             FilledButton.tonalIcon(
               onPressed: loading ? null : onRefresh,
               icon: loading
-                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
                   : const Icon(Icons.sync_outlined),
               label: const Text('Refresh checks'),
             ),
@@ -1498,16 +2396,30 @@ class _OfflineReadinessTile extends StatelessWidget {
         ),
         const SizedBox(height: 12),
         if (status == null)
-          Text('No readiness snapshot yet. Run refresh to load checks.', style: Theme.of(context).textTheme.bodyMedium)
+          Text(
+            'No readiness snapshot yet. Run refresh to load checks.',
+            style: Theme.of(context).textTheme.bodyMedium,
+          )
         else ...[
           Wrap(
             spacing: 10,
             runSpacing: 10,
             children: [
-              _QuickFact(label: 'Overall', value: status!.ready ? 'Ready' : 'Needs action'),
+              _QuickFact(
+                label: 'Overall',
+                value: status!.ready ? 'Ready' : 'Needs action',
+              ),
               _QuickFact(label: 'DB mode', value: status!.databaseMode),
-              _QuickFact(label: 'Model cache', value: modelCheck?.ok == true ? 'Warm' : 'Missing models'),
-              _QuickFact(label: 'Local LLM', value: llmCheck?.ok == true ? 'Reachable config' : 'Check base URL'),
+              _QuickFact(
+                label: 'Model cache',
+                value: modelCheck?.ok == true ? 'Warm' : 'Missing models',
+              ),
+              _QuickFact(
+                label: 'Local LLM',
+                value: llmCheck?.ok == true
+                    ? 'Reachable config'
+                    : 'Check base URL',
+              ),
             ],
           ),
           const SizedBox(height: 12),
@@ -1519,12 +2431,17 @@ class _OfflineReadinessTile extends StatelessWidget {
                 children: [
                   Icon(
                     check.ok ? Icons.check_circle_outline : Icons.error_outline,
-                    color: check.ok ? const Color(0xFF2E7D32) : const Color(0xFFB23A48),
+                    color: check.ok
+                        ? const Color(0xFF2E7D32)
+                        : const Color(0xFFB23A48),
                     size: 18,
                   ),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: Text('${check.name}: ${check.detail}', style: Theme.of(context).textTheme.bodySmall),
+                    child: Text(
+                      '${check.name}: ${check.detail}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
                   ),
                 ],
               ),
@@ -1565,7 +2482,12 @@ class _LeakageItem extends StatelessWidget {
           const SizedBox(height: 4),
           Text(reason, style: Theme.of(context).textTheme.bodySmall),
           const SizedBox(height: 4),
-          Text(suggestion, style: Theme.of(context).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600)),
+          Text(
+            suggestion,
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
+          ),
         ],
       ),
     );
@@ -1592,7 +2514,10 @@ class _LoadingState extends StatelessWidget {
                 if (error == null) ...[
                   const CircularProgressIndicator(),
                   const SizedBox(height: 18),
-                  Text('Loading clinician dashboard...', style: Theme.of(context).textTheme.titleMedium),
+                  Text(
+                    'Loading clinician dashboard...',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
                 ] else ...[
                   Text(error!, textAlign: TextAlign.center),
                   const SizedBox(height: 18),
@@ -1634,21 +2559,35 @@ class _CompactHeader extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Clinic Copilot', style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: Colors.white)),
+          Text(
+            'Clinic Copilot',
+            style: Theme.of(
+              context,
+            ).textTheme.headlineSmall?.copyWith(color: Colors.white),
+          ),
           const SizedBox(height: 8),
           Wrap(
             spacing: 10,
             runSpacing: 10,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              _StatusChip(label: reviewStatus.replaceAll('_', ' ').toUpperCase()),
-              Text(patientLabel, style: Theme.of(context).textTheme.titleLarge?.copyWith(color: Colors.white)),
+              _StatusChip(
+                label: reviewStatus.replaceAll('_', ' ').toUpperCase(),
+              ),
+              Text(
+                patientLabel,
+                style: Theme.of(
+                  context,
+                ).textTheme.titleLarge?.copyWith(color: Colors.white),
+              ),
             ],
           ),
           const SizedBox(height: 6),
           Text(
             'Case $caseId • Updated ${_formatDateTime(updatedAt)}',
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.white70),
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
           ),
         ],
       ),
@@ -1702,7 +2641,10 @@ class _CaseSelectorBar extends StatelessWidget {
                     .map(
                       (caseRecord) => DropdownMenuItem<String>(
                         value: caseRecord.caseId,
-                        child: Text(caseRecord.patientLabel, overflow: TextOverflow.ellipsis),
+                        child: Text(
+                          caseRecord.patientLabel,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
                     )
                     .toList(),
@@ -1719,7 +2661,13 @@ class _CaseSelectorBar extends StatelessWidget {
           const SizedBox(width: 12),
           IconButton.filledTonal(
             onPressed: onRefresh,
-            icon: switchingCase ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.sync),
+            icon: switchingCase
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.sync),
           ),
         ],
       ),
@@ -1787,11 +2735,18 @@ class _TopHeader extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Clinic Copilot', style: theme.textTheme.displaySmall?.copyWith(color: Colors.white)),
+                Text(
+                  'Clinic Copilot',
+                  style: theme.textTheme.displaySmall?.copyWith(
+                    color: Colors.white,
+                  ),
+                ),
                 const SizedBox(height: 10),
                 Text(
                   'Production review workspace for chart validation, agent-assisted triage, note correction, and auditable clinician sign-off.',
-                  style: theme.textTheme.bodyLarge?.copyWith(color: Colors.white.withValues(alpha: 0.86)),
+                  style: theme.textTheme.bodyLarge?.copyWith(
+                    color: Colors.white.withValues(alpha: 0.86),
+                  ),
                 ),
                 const SizedBox(height: 18),
                 Wrap(
@@ -1799,13 +2754,24 @@ class _TopHeader extends StatelessWidget {
                   runSpacing: 10,
                   crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
-                    _StatusChip(label: reviewStatus.replaceAll('_', ' ').toUpperCase()),
-                    Text(patientLabel, style: theme.textTheme.titleLarge?.copyWith(color: Colors.white)),
+                    _StatusChip(
+                      label: reviewStatus.replaceAll('_', ' ').toUpperCase(),
+                    ),
+                    Text(
+                      patientLabel,
+                      style: theme.textTheme.titleLarge?.copyWith(
+                        color: Colors.white,
+                      ),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 6),
-                Text('Case $caseId • Updated ${_formatDateTime(updatedAt)}',
-                    style: theme.textTheme.bodyMedium?.copyWith(color: Colors.white70)),
+                Text(
+                  'Case $caseId • Updated ${_formatDateTime(updatedAt)}',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: Colors.white70,
+                  ),
+                ),
               ],
             ),
           ),
@@ -1815,20 +2781,44 @@ class _TopHeader extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    Expanded(child: _MetricTile(label: 'Queue', value: '$totalCases', tone: const Color(0xFFFFE7C6), onTap: onTapQueue)),
+                    Expanded(
+                      child: _MetricTile(
+                        label: 'Queue',
+                        value: '$totalCases',
+                        tone: const Color(0xFFFFE7C6),
+                        onTap: onTapQueue,
+                      ),
+                    ),
                     const SizedBox(width: 12),
-                    Expanded(child: _MetricTile(label: 'Pending', value: '$pendingCases', tone: const Color(0xFFD6F5EB), onTap: onTapPending)),
+                    Expanded(
+                      child: _MetricTile(
+                        label: 'Pending',
+                        value: '$pendingCases',
+                        tone: const Color(0xFFD6F5EB),
+                        onTap: onTapPending,
+                      ),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 12),
                 Row(
                   children: [
                     Expanded(
-                      child: _MetricTile(label: 'Needs changes', value: '$needsChangesCases', tone: const Color(0xFFFFE1D6), onTap: onTapNeedsChanges),
+                      child: _MetricTile(
+                        label: 'Needs changes',
+                        value: '$needsChangesCases',
+                        tone: const Color(0xFFFFE1D6),
+                        onTap: onTapNeedsChanges,
+                      ),
                     ),
                     const SizedBox(width: 12),
                     Expanded(
-                      child: _MetricTile(label: 'Critical flags', value: '$criticalCases', tone: const Color(0xFFFFD7D1), onTap: onTapCritical),
+                      child: _MetricTile(
+                        label: 'Critical flags',
+                        value: '$criticalCases',
+                        tone: const Color(0xFFFFD7D1),
+                        onTap: onTapCritical,
+                      ),
                     ),
                   ],
                 ),
@@ -1839,7 +2829,10 @@ class _TopHeader extends StatelessWidget {
                     onPressed: onRefresh,
                     icon: const Icon(Icons.sync),
                     label: const Text('Refresh data'),
-                    style: OutlinedButton.styleFrom(foregroundColor: Colors.white, side: const BorderSide(color: Colors.white54)),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      side: const BorderSide(color: Colors.white54),
+                    ),
                   ),
                 ),
               ],
@@ -1852,7 +2845,10 @@ class _TopHeader extends StatelessWidget {
 }
 
 class _WorkspaceSwitcher extends StatelessWidget {
-  const _WorkspaceSwitcher({required this.currentView, required this.onChanged});
+  const _WorkspaceSwitcher({
+    required this.currentView,
+    required this.onChanged,
+  });
 
   final WorkspaceView currentView;
   final ValueChanged<WorkspaceView> onChanged;
@@ -1931,12 +2927,16 @@ class _WorkspaceButton extends StatelessWidget {
         ? FilledButton.styleFrom(
             backgroundColor: const Color(0xFF12212B),
             foregroundColor: Colors.white,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(18),
+            ),
           )
         : OutlinedButton.styleFrom(
             foregroundColor: const Color(0xFF12212B),
             side: BorderSide(color: Colors.black.withValues(alpha: 0.08)),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(18),
+            ),
           );
 
     if (selected) {
@@ -1960,10 +2960,7 @@ class _WorkspaceButton extends StatelessWidget {
 }
 
 class _MobileBottomNav extends StatelessWidget {
-  const _MobileBottomNav({
-    required this.currentView,
-    required this.onChanged,
-  });
+  const _MobileBottomNav({required this.currentView, required this.onChanged});
 
   final WorkspaceView currentView;
   final ValueChanged<WorkspaceView> onChanged;
@@ -1974,9 +2971,15 @@ class _MobileBottomNav extends StatelessWidget {
       selectedIndex: WorkspaceView.values.indexOf(currentView),
       onDestinationSelected: (index) => onChanged(WorkspaceView.values[index]),
       destinations: const [
-        NavigationDestination(icon: Icon(Icons.dashboard_outlined), label: 'Overview'),
+        NavigationDestination(
+          icon: Icon(Icons.dashboard_outlined),
+          label: 'Overview',
+        ),
         NavigationDestination(icon: Icon(Icons.edit_note), label: 'Note'),
-        NavigationDestination(icon: Icon(Icons.smart_toy_outlined), label: 'Agents'),
+        NavigationDestination(
+          icon: Icon(Icons.smart_toy_outlined),
+          label: 'Agents',
+        ),
         NavigationDestination(icon: Icon(Icons.timeline), label: 'Audit'),
       ],
     );
@@ -2014,9 +3017,15 @@ class _WorkspaceBanner extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(_titleFor(view), style: Theme.of(context).textTheme.titleLarge),
+                Text(
+                  _titleFor(view),
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
                 const SizedBox(height: 4),
-                Text(_subtitleFor(view), style: Theme.of(context).textTheme.bodyMedium),
+                Text(
+                  _subtitleFor(view),
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
               ],
             ),
           ),
@@ -2114,9 +3123,18 @@ class _AmbientNudgeToggle extends StatelessWidget {
                           }
                         : null,
                     items: const [
-                      DropdownMenuItem(value: 'low', child: Text('Sensitivity: Low')),
-                      DropdownMenuItem(value: 'medium', child: Text('Sensitivity: Medium')),
-                      DropdownMenuItem(value: 'high', child: Text('Sensitivity: High')),
+                      DropdownMenuItem(
+                        value: 'low',
+                        child: Text('Sensitivity: Low'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'medium',
+                        child: Text('Sensitivity: Medium'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'high',
+                        child: Text('Sensitivity: High'),
+                      ),
                     ],
                   ),
                 ),
@@ -2182,7 +3200,10 @@ class _VisionAssistPanel extends StatelessWidget {
                   style: Theme.of(context).textTheme.titleSmall,
                 ),
                 const SizedBox(height: 6),
-                Text(latest!.objectiveText, style: Theme.of(context).textTheme.bodyMedium),
+                Text(
+                  latest!.objectiveText,
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
               ],
             ),
           ),
@@ -2216,7 +3237,10 @@ class _PatientAvsPanel extends StatelessWidget {
         for (final line in bullets)
           Padding(
             padding: const EdgeInsets.only(bottom: 4),
-            child: Text('• $line', style: Theme.of(context).textTheme.bodyMedium),
+            child: Text(
+              '• $line',
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
           ),
       ],
     );
@@ -2234,7 +3258,11 @@ class _PatientAvsPanel extends StatelessWidget {
             FilledButton.tonalIcon(
               onPressed: running ? null : onGenerate,
               icon: running
-                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
                   : const Icon(Icons.record_voice_over_outlined),
               label: Text(running ? 'Generating...' : 'Generate patient AVS'),
             ),
@@ -2265,12 +3293,19 @@ class _PatientAvsPanel extends StatelessWidget {
                 const SizedBox(height: 10),
                 _section(context, 'What we found', latest!.whatWeFound),
                 const SizedBox(height: 10),
-                _section(context, 'What you need to do next', latest!.whatYouNeedToDoNext),
+                _section(
+                  context,
+                  'What you need to do next',
+                  latest!.whatYouNeedToDoNext,
+                ),
                 const SizedBox(height: 10),
                 _section(context, 'When to get help', latest!.whenToGetHelp),
                 if (latest!.disclaimer.trim().isNotEmpty) ...[
                   const SizedBox(height: 10),
-                  Text(latest!.disclaimer, style: Theme.of(context).textTheme.bodySmall),
+                  Text(
+                    latest!.disclaimer,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
                 ],
               ],
             ),
@@ -2306,7 +3341,9 @@ class _QueueRail extends StatelessWidget {
   Widget build(BuildContext context) {
     return _Panel(
       title: 'Live queue',
-      subtitle: switchingCase ? 'Opening chart...' : 'Filter by status, search patients, and jump between cases.',
+      subtitle: switchingCase
+          ? 'Opening chart...'
+          : 'Filter by status, search patients, and jump between cases.',
       accent: const Color(0xFF244553),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -2324,9 +3361,16 @@ class _QueueRail extends StatelessWidget {
             spacing: 8,
             runSpacing: 8,
             children: [
-              for (final filter in const ['all', 'pending_review', 'needs_changes', 'approved'])
+              for (final filter in const [
+                'all',
+                'pending_review',
+                'needs_changes',
+                'approved',
+              ])
                 ChoiceChip(
-                  label: Text(filter == 'all' ? 'All' : filter.replaceAll('_', ' ')),
+                  label: Text(
+                    filter == 'all' ? 'All' : filter.replaceAll('_', ' '),
+                  ),
                   selected: queueFilter == filter,
                   onSelected: (_) => onFilterChanged(filter),
                 ),
@@ -2339,21 +3383,29 @@ class _QueueRail extends StatelessWidget {
             Column(
               children: cases.map((caseRecord) {
                 final selected = caseRecord.caseId == selectedCaseId;
-                final hasWarning = caseRecord.note.reviewFlags.any((flag) => flag.severity != 'info');
+                final hasWarning = caseRecord.note.reviewFlags.any(
+                  (flag) => flag.severity != 'info',
+                );
                 return Padding(
                   padding: const EdgeInsets.only(bottom: 12),
                   child: InkWell(
                     borderRadius: BorderRadius.circular(20),
-                    onTap: switchingCase ? null : () => onSelectCase(caseRecord.caseId),
+                    onTap: switchingCase
+                        ? null
+                        : () => onSelectCase(caseRecord.caseId),
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 180),
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
-                        color: selected ? const Color(0xFF12212B) : Colors.white.withValues(alpha: 0.82),
+                        color: selected
+                            ? const Color(0xFF12212B)
+                            : Colors.white.withValues(alpha: 0.82),
                         borderRadius: BorderRadius.circular(20),
                         border: Border.all(
                           color: hasWarning
-                              ? const Color(0xFFC96F4A).withValues(alpha: selected ? 0.32 : 0.62)
+                              ? const Color(
+                                  0xFFC96F4A,
+                                ).withValues(alpha: selected ? 0.32 : 0.62)
                               : Colors.black.withValues(alpha: 0.06),
                         ),
                       ),
@@ -2365,8 +3417,11 @@ class _QueueRail extends StatelessWidget {
                               Expanded(
                                 child: Text(
                                   caseRecord.patientLabel,
-                                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                                        color: selected ? Colors.white : const Color(0xFF12212B),
+                                  style: Theme.of(context).textTheme.titleMedium
+                                      ?.copyWith(
+                                        color: selected
+                                            ? Colors.white
+                                            : const Color(0xFF12212B),
                                       ),
                                 ),
                               ),
@@ -2378,8 +3433,11 @@ class _QueueRail extends StatelessWidget {
                             caseRecord.note.summary,
                             maxLines: 3,
                             overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                  color: selected ? Colors.white70 : Colors.black87,
+                            style: Theme.of(context).textTheme.bodyMedium
+                                ?.copyWith(
+                                  color: selected
+                                      ? Colors.white70
+                                      : Colors.black87,
                                 ),
                           ),
                           const SizedBox(height: 10),
@@ -2388,15 +3446,20 @@ class _QueueRail extends StatelessWidget {
                               Expanded(
                                 child: Text(
                                   _formatDateTime(caseRecord.updatedAt),
-                                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                        color: selected ? Colors.white54 : Colors.black54,
+                                  style: Theme.of(context).textTheme.bodyMedium
+                                      ?.copyWith(
+                                        color: selected
+                                            ? Colors.white54
+                                            : Colors.black54,
                                       ),
                                 ),
                               ),
                               if (hasWarning)
                                 Icon(
                                   Icons.priority_high_rounded,
-                                  color: selected ? Colors.white70 : const Color(0xFFC96F4A),
+                                  color: selected
+                                      ? Colors.white70
+                                      : const Color(0xFFC96F4A),
                                   size: 18,
                                 ),
                             ],
@@ -2475,7 +3538,9 @@ class _SideRail extends StatelessWidget {
               TextField(
                 controller: feedbackController,
                 maxLines: 4,
-                decoration: const InputDecoration(labelText: 'Feedback for the team'),
+                decoration: const InputDecoration(
+                  labelText: 'Feedback for the team',
+                ),
               ),
               const SizedBox(height: 16),
               Row(
@@ -2505,7 +3570,8 @@ class _SideRail extends StatelessWidget {
         const SizedBox(height: 16),
         _Panel(
           title: 'Readiness score',
-          subtitle: 'A quick heuristic so the reviewer knows whether this chart is close to sign-off.',
+          subtitle:
+              'A quick heuristic so the reviewer knows whether this chart is close to sign-off.',
           accent: const Color(0xFF1D6A72),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -2524,7 +3590,10 @@ class _SideRail extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 12),
-                  Text('$reviewScore%', style: Theme.of(context).textTheme.titleLarge),
+                  Text(
+                    '$reviewScore%',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
                 ],
               ),
               const SizedBox(height: 16),
@@ -2549,22 +3618,47 @@ class _SideRail extends StatelessWidget {
         const SizedBox(height: 16),
         _Panel(
           title: 'Quick actions',
-          subtitle: 'Production workflows should route reviewers, not just display data.',
+          subtitle:
+              'Production workflows should route reviewers, not just display data.',
           accent: const Color(0xFFC96F4A),
           child: Column(
             children: [
-              _ActionButton(label: 'Open transcript', icon: Icons.forum_outlined, onTap: onOpenTranscript),
-              _ActionButton(label: 'Jump to flags', icon: Icons.warning_amber_rounded, onTap: onOpenFlags),
-              _ActionButton(label: 'Edit note', icon: Icons.edit_note, onTap: onOpenEditor),
-              _ActionButton(label: 'View audit trail', icon: Icons.timeline, onTap: onOpenAudit),
-              _ActionButton(label: 'New intake case', icon: Icons.person_add_outlined, onTap: onNewCase),
               _ActionButton(
-                label: runningAgent ? 'Running safety agent...' : 'Run safety reviewer',
+                label: 'Open transcript',
+                icon: Icons.forum_outlined,
+                onTap: onOpenTranscript,
+              ),
+              _ActionButton(
+                label: 'Jump to flags',
+                icon: Icons.warning_amber_rounded,
+                onTap: onOpenFlags,
+              ),
+              _ActionButton(
+                label: 'Edit note',
+                icon: Icons.edit_note,
+                onTap: onOpenEditor,
+              ),
+              _ActionButton(
+                label: 'View audit trail',
+                icon: Icons.timeline,
+                onTap: onOpenAudit,
+              ),
+              _ActionButton(
+                label: 'New intake case',
+                icon: Icons.person_add_outlined,
+                onTap: onNewCase,
+              ),
+              _ActionButton(
+                label: runningAgent
+                    ? 'Running safety agent...'
+                    : 'Run safety reviewer',
                 icon: Icons.verified_user_outlined,
                 onTap: runningAgent ? null : onRunSafety,
               ),
               _ActionButton(
-                label: runningAgent ? 'Running queue agent...' : 'Run queue orchestrator',
+                label: runningAgent
+                    ? 'Running queue agent...'
+                    : 'Run queue orchestrator',
                 icon: Icons.hub_outlined,
                 onTap: runningAgent ? null : onRunQueue,
               ),
@@ -2638,7 +3732,9 @@ class _FlagsAndDiagnosisPanel extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (flags.isEmpty)
-          const _EmptyState(message: 'No review flags were generated for this note.')
+          const _EmptyState(
+            message: 'No review flags were generated for this note.',
+          )
         else
           ...flags.map(
             (flag) => Padding(
@@ -2651,10 +3747,15 @@ class _FlagsAndDiagnosisPanel extends StatelessWidget {
             ),
           ),
         const SizedBox(height: 8),
-        Text('Differential diagnosis', style: Theme.of(context).textTheme.titleMedium),
+        Text(
+          'Differential diagnosis',
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
         const SizedBox(height: 10),
         if (differentialDiagnosis.isEmpty)
-          const _EmptyState(message: 'Differential diagnosis was not included for this case.')
+          const _EmptyState(
+            message: 'Differential diagnosis was not included for this case.',
+          )
         else
           ...differentialDiagnosis.map(
             (item) => Padding(
@@ -2664,14 +3765,21 @@ class _FlagsAndDiagnosisPanel extends StatelessWidget {
                 decoration: BoxDecoration(
                   color: Colors.white.withValues(alpha: 0.75),
                   borderRadius: BorderRadius.circular(18),
-                  border: Border.all(color: Colors.black.withValues(alpha: 0.06)),
+                  border: Border.all(
+                    color: Colors.black.withValues(alpha: 0.06),
+                  ),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(
                       children: [
-                        Expanded(child: Text(item.condition, style: Theme.of(context).textTheme.titleMedium)),
+                        Expanded(
+                          child: Text(
+                            item.condition,
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                        ),
                         _MiniBadge(label: item.confidence),
                       ],
                     ),
@@ -2728,7 +3836,11 @@ class _RetrievalCitationsPanel extends StatelessWidget {
             FilledButton.tonalIcon(
               onPressed: loading ? null : onRefresh,
               icon: loading
-                  ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
                   : const Icon(Icons.refresh),
               label: Text(loading ? 'Loading...' : 'Refresh citations'),
             ),
@@ -2740,7 +3852,9 @@ class _RetrievalCitationsPanel extends StatelessWidget {
         else if (loading && payload == null)
           const _EmptyState(message: 'Fetching retrieval evidence...')
         else if (matches.isEmpty)
-          const _EmptyState(message: 'No citations were returned for this complaint.')
+          const _EmptyState(
+            message: 'No citations were returned for this complaint.',
+          )
         else
           Column(
             children: matches
@@ -2763,13 +3877,20 @@ class _RetrievalCitationsPanel extends StatelessWidget {
                             runSpacing: 8,
                             children: [
                               _MiniBadge(label: 'Visit ${item.visitId}'),
-                              _MiniBadge(label: 'Date ${_displayDate(item.date)}'),
+                              _MiniBadge(
+                                label: 'Date ${_displayDate(item.date)}',
+                              ),
                               _MiniBadge(label: 'Source ${item.source}'),
-                              _MiniBadge(label: 'Score ${item.score.toStringAsFixed(3)}'),
+                              _MiniBadge(
+                                label: 'Score ${item.score.toStringAsFixed(3)}',
+                              ),
                             ],
                           ),
                           const SizedBox(height: 8),
-                          Text(item.textChunk, style: Theme.of(context).textTheme.bodyMedium),
+                          Text(
+                            item.textChunk,
+                            style: Theme.of(context).textTheme.bodyMedium,
+                          ),
                         ],
                       ),
                     ),
@@ -2898,10 +4019,15 @@ class _AgentPanel extends StatelessWidget {
     required this.agents,
     required this.agentTranscriptController,
     required this.runningAgent,
+    required this.runningBillingAgent,
     required this.latestResponse,
+    required this.latestBillingResponse,
     required this.onRunSafety,
     required this.onRunQueue,
     required this.onRunIntake,
+    required this.onRunScribe,
+    required this.onRunPatientComm,
+    required this.onRunBilling,
     required this.onSelectQueueCase,
     required this.onOpenSafetyIssue,
     required this.onOpenCreatedCase,
@@ -2910,10 +4036,15 @@ class _AgentPanel extends StatelessWidget {
   final List<AgentSummary> agents;
   final TextEditingController agentTranscriptController;
   final bool runningAgent;
+  final bool runningBillingAgent;
   final AgentRunResponse? latestResponse;
+  final AgentRunResponse? latestBillingResponse;
   final VoidCallback onRunSafety;
   final VoidCallback onRunQueue;
   final VoidCallback onRunIntake;
+  final VoidCallback onRunScribe;
+  final VoidCallback onRunPatientComm;
+  final Future<void> Function() onRunBilling;
   final ValueChanged<String> onSelectQueueCase;
   final ValueChanged<SafetyIssue> onOpenSafetyIssue;
   final ValueChanged<String> onOpenCreatedCase;
@@ -2921,6 +4052,7 @@ class _AgentPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final response = latestResponse;
+    final busy = runningAgent || runningBillingAgent;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -2938,41 +4070,129 @@ class _AgentPanel extends StatelessWidget {
               .toList(),
         ),
         const SizedBox(height: 16),
+        // ── Intake transcript input ───────────────────────────────────────
         TextField(
           controller: agentTranscriptController,
           maxLines: 5,
           decoration: const InputDecoration(
             labelText: 'New intake transcript',
-            hintText: 'Paste a new doctor-patient conversation here',
+            hintText:
+                'Paste a new doctor-patient conversation here (required for Intake and Scribe agents)',
           ),
         ),
         const SizedBox(height: 14),
+        // ── Agent buttons grouped by purpose ─────────────────────────────
+        Text(
+          'Documentation agents',
+          style: Theme.of(context).textTheme.labelLarge,
+        ),
+        const SizedBox(height: 8),
         Wrap(
           spacing: 10,
           runSpacing: 10,
           children: [
             FilledButton.icon(
-              onPressed: runningAgent ? null : onRunIntake,
-              icon: const Icon(Icons.play_arrow_rounded),
-              label: Text(runningAgent ? 'Running...' : 'Run intake agent'),
+              onPressed: busy ? null : onRunIntake,
+              icon: busy && response?.agentId == 'clinical_intake_agent'
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Icon(Icons.play_arrow_rounded),
+              label: const Text('Run intake agent'),
             ),
+            FilledButton.icon(
+              onPressed: busy ? null : onRunScribe,
+              icon: busy && response?.agentId == 'scribe_agent'
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Icon(Icons.edit_note),
+              label: const Text('Run scribe agent'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 14),
+        Text(
+          'Review & safety agents',
+          style: Theme.of(context).textTheme.labelLarge,
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
             OutlinedButton.icon(
-              onPressed: runningAgent ? null : onRunSafety,
+              onPressed: busy ? null : onRunSafety,
               icon: const Icon(Icons.health_and_safety_outlined),
               label: const Text('Run safety reviewer'),
             ),
             OutlinedButton.icon(
-              onPressed: runningAgent ? null : onRunQueue,
+              onPressed: busy ? null : onRunQueue,
               icon: const Icon(Icons.queue_play_next),
               label: const Text('Run queue orchestrator'),
             ),
           ],
         ),
+        const SizedBox(height: 14),
+        Text(
+          'Patient & billing agents',
+          style: Theme.of(context).textTheme.labelLarge,
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            OutlinedButton.icon(
+              onPressed: busy ? null : onRunPatientComm,
+              icon: const Icon(Icons.record_voice_over_outlined),
+              label: const Text('Run patient communicator'),
+            ),
+            OutlinedButton.icon(
+              onPressed: runningBillingAgent ? null : onRunBilling,
+              icon: runningBillingAgent
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.attach_money_outlined),
+              label: const Text('Run billing optimizer'),
+            ),
+          ],
+        ),
         const SizedBox(height: 18),
-        if (response == null)
-          const _EmptyState(message: 'Run an agent to populate this command center.')
-        else ...[
-          Text('Latest result: ${response.agentName}', style: Theme.of(context).textTheme.titleMedium),
+        // ── Latest agent result ───────────────────────────────────────────
+        if (response == null && latestBillingResponse == null)
+          const _EmptyState(
+            message: 'Run an agent to populate this command center.',
+          )
+        else if (latestBillingResponse != null && response == null) ...[
+          Text(
+            'Latest result: ${latestBillingResponse!.agentName}',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 12),
+          _BillingLeakageCard(
+            running: runningBillingAgent,
+            latestResponse: latestBillingResponse,
+            onRun: onRunBilling,
+          ),
+        ] else if (response != null) ...[
+          Text(
+            'Latest result: ${response.agentName}',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
           const SizedBox(height: 12),
           if (response.agentId == 'clinical_intake_agent')
             _IntakeAgentResult(
@@ -2989,6 +4209,10 @@ class _AgentPanel extends StatelessWidget {
               response: response,
               onSelectQueueCase: onSelectQueueCase,
             )
+          else if (response.agentId == 'scribe_agent')
+            _ScribeAgentResult(response: response)
+          else if (response.agentId == 'patient_communicator_agent')
+            _PatientCommunicatorAgentResult(response: response)
           else
             Text(response.result.toString()),
         ],
@@ -3008,14 +4232,18 @@ class _IntakeAgentResult extends StatelessWidget {
     final result = response.result;
     final caseId = result['case_id']?.toString() ?? '';
     final entities = ClinicalEntities.fromJson(
-      result['entities'] is Map ? Map<String, dynamic>.from(result['entities'] as Map) : const {},
+      result['entities'] is Map
+          ? Map<String, dynamic>.from(result['entities'] as Map)
+          : const {},
     );
     final rawReviewFlags = result['review_flags'];
     final reviewFlags = rawReviewFlags is List
         ? rawReviewFlags
-            .whereType<Map>()
-            .map((item) => ReviewFlag.fromJson(Map<String, dynamic>.from(item)))
-            .toList()
+              .whereType<Map>()
+              .map(
+                (item) => ReviewFlag.fromJson(Map<String, dynamic>.from(item)),
+              )
+              .toList()
         : const <ReviewFlag>[];
 
     return Container(
@@ -3030,7 +4258,11 @@ class _IntakeAgentResult extends StatelessWidget {
         children: [
           Row(
             children: [
-              Expanded(child: Text(result['patient_label']?.toString() ?? 'Generated case')),
+              Expanded(
+                child: Text(
+                  result['patient_label']?.toString() ?? 'Generated case',
+                ),
+              ),
               FilledButton.tonal(
                 onPressed: caseId.isEmpty ? null : () => onOpenCase(caseId),
                 child: const Text('Open case'),
@@ -3044,10 +4276,19 @@ class _IntakeAgentResult extends StatelessWidget {
             spacing: 10,
             runSpacing: 10,
             children: [
-              _QuickFact(label: 'Symptoms', value: '${entities.symptoms.length}'),
-              _QuickFact(label: 'Allergies', value: '${entities.allergies.length}'),
+              _QuickFact(
+                label: 'Symptoms',
+                value: '${entities.symptoms.length}',
+              ),
+              _QuickFact(
+                label: 'Allergies',
+                value: '${entities.allergies.length}',
+              ),
               _QuickFact(label: 'Flags', value: '${reviewFlags.length}'),
-              _QuickFact(label: 'Status', value: result['review_status']?.toString() ?? 'unknown'),
+              _QuickFact(
+                label: 'Status',
+                value: result['review_status']?.toString() ?? 'unknown',
+              ),
             ],
           ),
         ],
@@ -3057,7 +4298,10 @@ class _IntakeAgentResult extends StatelessWidget {
 }
 
 class _SafetyAgentResult extends StatelessWidget {
-  const _SafetyAgentResult({required this.response, required this.onOpenSafetyIssue});
+  const _SafetyAgentResult({
+    required this.response,
+    required this.onOpenSafetyIssue,
+  });
 
   final AgentRunResponse response;
   final ValueChanged<SafetyIssue> onOpenSafetyIssue;
@@ -3068,9 +4312,11 @@ class _SafetyAgentResult extends StatelessWidget {
     final rawIssues = result['issues'];
     final issues = rawIssues is List
         ? rawIssues
-            .whereType<Map>()
-            .map((item) => SafetyIssue.fromJson(Map<String, dynamic>.from(item)))
-            .toList()
+              .whereType<Map>()
+              .map(
+                (item) => SafetyIssue.fromJson(Map<String, dynamic>.from(item)),
+              )
+              .toList()
         : const <SafetyIssue>[];
 
     return Column(
@@ -3084,7 +4330,8 @@ class _SafetyAgentResult extends StatelessWidget {
                 child: _SeverityCard(
                   issue: issue.issue,
                   severity: issue.severity,
-                  recommendation: '${issue.recommendation} Tap to route to the relevant review section.',
+                  recommendation:
+                      '${issue.recommendation} Tap to route to the relevant review section.',
                 ),
               ),
             ),
@@ -3095,7 +4342,10 @@ class _SafetyAgentResult extends StatelessWidget {
 }
 
 class _QueueAgentResult extends StatelessWidget {
-  const _QueueAgentResult({required this.response, required this.onSelectQueueCase});
+  const _QueueAgentResult({
+    required this.response,
+    required this.onSelectQueueCase,
+  });
 
   final AgentRunResponse response;
   final ValueChanged<String> onSelectQueueCase;
@@ -3106,9 +4356,12 @@ class _QueueAgentResult extends StatelessWidget {
     final rawRankedCases = result['ranked_cases'];
     final rankedCases = rawRankedCases is List
         ? rawRankedCases
-            .whereType<Map>()
-            .map((item) => QueueRankedCase.fromJson(Map<String, dynamic>.from(item)))
-            .toList()
+              .whereType<Map>()
+              .map(
+                (item) =>
+                    QueueRankedCase.fromJson(Map<String, dynamic>.from(item)),
+              )
+              .toList()
         : const <QueueRankedCase>[];
 
     return Column(
@@ -3127,23 +4380,36 @@ class _QueueAgentResult extends StatelessWidget {
                 decoration: BoxDecoration(
                   color: Colors.white.withValues(alpha: 0.8),
                   borderRadius: BorderRadius.circular(18),
-                  border: Border.all(color: Colors.black.withValues(alpha: 0.06)),
+                  border: Border.all(
+                    color: Colors.black.withValues(alpha: 0.06),
+                  ),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(
                       children: [
-                        Expanded(child: Text(item.patientLabel, style: Theme.of(context).textTheme.titleMedium)),
+                        Expanded(
+                          child: Text(
+                            item.patientLabel,
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                        ),
                         _MiniBadge(label: item.reviewStatus),
                       ],
                     ),
                     const SizedBox(height: 8),
                     Text(item.topIssue),
                     const SizedBox(height: 6),
-                    Text(item.recommendedAction, style: Theme.of(context).textTheme.bodyMedium),
+                    Text(
+                      item.recommendedAction,
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
                     const SizedBox(height: 10),
-                    Text('Tap to open case', style: Theme.of(context).textTheme.bodyMedium),
+                    Text(
+                      'Tap to open case',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
                   ],
                 ),
               ),
@@ -3151,6 +4417,177 @@ class _QueueAgentResult extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _ScribeAgentResult extends StatelessWidget {
+  const _ScribeAgentResult({required this.response});
+
+  final AgentRunResponse response;
+
+  static String _soapText(dynamic soapJson, String section) {
+    if (soapJson is! Map) return '';
+    final sec = soapJson[section];
+    if (sec is! Map) return '';
+    return sec['text']?.toString() ?? '';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final result = response.result;
+    final soapJson = result['soap_note'];
+    final subjective = _soapText(soapJson, 'subjective');
+    final objective = _soapText(soapJson, 'objective');
+    final assessment = _soapText(soapJson, 'assessment');
+    final plan = _soapText(soapJson, 'plan');
+    final safetyInvoked = result['safety_tool_invoked'] == true;
+    final rawFlags = result['review_flags'];
+    final flagCount = rawFlags is List ? rawFlags.length : 0;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.78),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.black.withValues(alpha: 0.06)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            result['patient_label']?.toString() ?? 'Scribe output',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              _QuickFact(
+                label: 'Safety check',
+                value: safetyInvoked ? 'Triggered' : 'Not triggered',
+              ),
+              _QuickFact(label: 'Review flags', value: '$flagCount'),
+            ],
+          ),
+          if (subjective.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Text('Subjective', style: Theme.of(context).textTheme.labelLarge),
+            const SizedBox(height: 4),
+            Text(subjective, style: Theme.of(context).textTheme.bodyMedium),
+          ],
+          if (objective.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text('Objective', style: Theme.of(context).textTheme.labelLarge),
+            const SizedBox(height: 4),
+            Text(objective, style: Theme.of(context).textTheme.bodyMedium),
+          ],
+          if (assessment.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text('Assessment', style: Theme.of(context).textTheme.labelLarge),
+            const SizedBox(height: 4),
+            Text(assessment, style: Theme.of(context).textTheme.bodyMedium),
+          ],
+          if (plan.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text('Plan', style: Theme.of(context).textTheme.labelLarge),
+            const SizedBox(height: 4),
+            Text(plan, style: Theme.of(context).textTheme.bodyMedium),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _PatientCommunicatorAgentResult extends StatelessWidget {
+  const _PatientCommunicatorAgentResult({required this.response});
+
+  final AgentRunResponse response;
+
+  @override
+  Widget build(BuildContext context) {
+    final result = response.result;
+    final whatWeFound = result['what_we_found'];
+    final nextSteps = result['what_you_need_to_do_next'];
+    final whenToGetHelp = result['when_to_get_help'];
+    final readingLevel = result['reading_level']?.toString() ?? '';
+    final disclaimer = result['disclaimer']?.toString() ?? '';
+
+    List<String> toStringList(dynamic raw) {
+      if (raw is List) return raw.map((item) => item.toString()).toList();
+      return const [];
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8F6FF),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color(0xFFD9D0F2)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'After-Visit Summary${readingLevel.isNotEmpty ? ' ($readingLevel)' : ''}',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 12),
+          if (toStringList(whatWeFound).isNotEmpty) ...[
+            Text(
+              'What we found',
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+            const SizedBox(height: 6),
+            for (final item in toStringList(whatWeFound))
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(
+                  '• $item',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ),
+            const SizedBox(height: 10),
+          ],
+          if (toStringList(nextSteps).isNotEmpty) ...[
+            Text(
+              'What you need to do next',
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+            const SizedBox(height: 6),
+            for (final item in toStringList(nextSteps))
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(
+                  '• $item',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ),
+            const SizedBox(height: 10),
+          ],
+          if (toStringList(whenToGetHelp).isNotEmpty) ...[
+            Text(
+              'When to get help',
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+            const SizedBox(height: 6),
+            for (final item in toStringList(whenToGetHelp))
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(
+                  '• $item',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ),
+          ],
+          if (disclaimer.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(disclaimer, style: Theme.of(context).textTheme.bodySmall),
+          ],
+        ],
+      ),
     );
   }
 }
@@ -3176,7 +4613,9 @@ class _AuditPanel extends StatelessWidget {
                 decoration: BoxDecoration(
                   color: Colors.white.withValues(alpha: 0.78),
                   borderRadius: BorderRadius.circular(18),
-                  border: Border.all(color: Colors.black.withValues(alpha: 0.06)),
+                  border: Border.all(
+                    color: Colors.black.withValues(alpha: 0.06),
+                  ),
                 ),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -3184,8 +4623,15 @@ class _AuditPanel extends StatelessWidget {
                     Container(
                       width: 42,
                       height: 42,
-                      decoration: const BoxDecoration(color: Color(0xFF12212B), shape: BoxShape.circle),
-                      child: const Icon(Icons.history, color: Colors.white, size: 20),
+                      decoration: const BoxDecoration(
+                        color: Color(0xFF12212B),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.history,
+                        color: Colors.white,
+                        size: 20,
+                      ),
                     ),
                     const SizedBox(width: 12),
                     Expanded(
@@ -3194,8 +4640,18 @@ class _AuditPanel extends StatelessWidget {
                         children: [
                           Row(
                             children: [
-                              Expanded(child: Text(entry.eventType.replaceAll('_', ' '), style: Theme.of(context).textTheme.titleMedium)),
-                              Text(_formatDateTime(entry.createdAt), style: Theme.of(context).textTheme.bodyMedium),
+                              Expanded(
+                                child: Text(
+                                  entry.eventType.replaceAll('_', ' '),
+                                  style: Theme.of(
+                                    context,
+                                  ).textTheme.titleMedium,
+                                ),
+                              ),
+                              Text(
+                                _formatDateTime(entry.createdAt),
+                                style: Theme.of(context).textTheme.bodyMedium,
+                              ),
                             ],
                           ),
                           const SizedBox(height: 6),
@@ -3241,7 +4697,10 @@ class _Panel extends StatelessWidget {
             Container(
               width: 56,
               height: 4,
-              decoration: BoxDecoration(color: accent, borderRadius: BorderRadius.circular(999)),
+              decoration: BoxDecoration(
+                color: accent,
+                borderRadius: BorderRadius.circular(999),
+              ),
             ),
             const SizedBox(height: 16),
             Text(title, style: theme.textTheme.headlineSmall),
@@ -3257,7 +4716,12 @@ class _Panel extends StatelessWidget {
 }
 
 class _MetricTile extends StatelessWidget {
-  const _MetricTile({required this.label, required this.value, required this.tone, this.onTap});
+  const _MetricTile({
+    required this.label,
+    required this.value,
+    required this.tone,
+    this.onTap,
+  });
 
   final String label;
   final String value;
@@ -3281,10 +4745,28 @@ class _MetricTile extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(label, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.white70)),
+              Text(
+                label,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
+              ),
               const SizedBox(height: 8),
-              Text(value, style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: Colors.white)),
-              if (onTap != null) ...[const SizedBox(height: 4), Text('Tap to filter', style: Theme.of(context).textTheme.labelSmall?.copyWith(color: Colors.white38))],
+              Text(
+                value,
+                style: Theme.of(
+                  context,
+                ).textTheme.headlineSmall?.copyWith(color: Colors.white),
+              ),
+              if (onTap != null) ...[
+                const SizedBox(height: 4),
+                Text(
+                  'Tap to filter',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.labelSmall?.copyWith(color: Colors.white38),
+                ),
+              ],
             ],
           ),
         ),
@@ -3294,7 +4776,12 @@ class _MetricTile extends StatelessWidget {
 }
 
 class _PulseCard extends StatelessWidget {
-  const _PulseCard({required this.label, required this.value, required this.accent, this.onTap});
+  const _PulseCard({
+    required this.label,
+    required this.value,
+    required this.accent,
+    this.onTap,
+  });
 
   final String label;
   final String value;
@@ -3314,15 +4801,30 @@ class _PulseCard extends StatelessWidget {
           decoration: BoxDecoration(
             color: Colors.white.withValues(alpha: 0.74),
             borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: accent.withValues(alpha: onTap != null ? 0.44 : 0.22)),
+            border: Border.all(
+              color: accent.withValues(alpha: onTap != null ? 0.44 : 0.22),
+            ),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(label, style: Theme.of(context).textTheme.bodyMedium),
               const SizedBox(height: 8),
-              Text(value, style: Theme.of(context).textTheme.titleLarge?.copyWith(color: accent)),
-              if (onTap != null) ...[const SizedBox(height: 4), Text('Tap to view', style: Theme.of(context).textTheme.labelSmall?.copyWith(color: Colors.black38))],
+              Text(
+                value,
+                style: Theme.of(
+                  context,
+                ).textTheme.titleLarge?.copyWith(color: accent),
+              ),
+              if (onTap != null) ...[
+                const SizedBox(height: 4),
+                Text(
+                  'Tap to view',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.labelSmall?.copyWith(color: Colors.black38),
+                ),
+              ],
             ],
           ),
         ),
@@ -3395,7 +4897,14 @@ class _SeverityCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              Expanded(child: Text(issue, style: Theme.of(context).textTheme.titleMedium?.copyWith(color: tone))),
+              Expanded(
+                child: Text(
+                  issue,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleMedium?.copyWith(color: tone),
+                ),
+              ),
               _MiniBadge(label: severity),
             ],
           ),
@@ -3427,7 +4936,11 @@ class _EntityField extends StatelessWidget {
 }
 
 class _ChecklistRow extends StatelessWidget {
-  const _ChecklistRow({required this.title, required this.trailing, required this.done});
+  const _ChecklistRow({
+    required this.title,
+    required this.trailing,
+    required this.done,
+  });
 
   final String title;
   final String trailing;
@@ -3439,7 +4952,10 @@ class _ChecklistRow extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: 10),
       child: Row(
         children: [
-          Icon(done ? Icons.check_circle : Icons.radio_button_unchecked, color: done ? const Color(0xFF1D6A72) : const Color(0xFFC96F4A)),
+          Icon(
+            done ? Icons.check_circle : Icons.radio_button_unchecked,
+            color: done ? const Color(0xFF1D6A72) : const Color(0xFFC96F4A),
+          ),
           const SizedBox(width: 10),
           Expanded(child: Text(title)),
           Text(trailing, style: Theme.of(context).textTheme.bodyMedium),
@@ -3469,10 +4985,7 @@ class _ActionButton extends StatelessWidget {
         child: OutlinedButton.icon(
           onPressed: onTap,
           icon: Icon(icon),
-          label: Align(
-            alignment: Alignment.centerLeft,
-            child: Text(label),
-          ),
+          label: Align(alignment: Alignment.centerLeft, child: Text(label)),
         ),
       ),
     );
@@ -3491,7 +5004,9 @@ class _ErrorBanner extends StatelessWidget {
       decoration: BoxDecoration(
         color: const Color(0xFFFFE0D9),
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: const Color(0xFFB9473E).withValues(alpha: 0.3)),
+        border: Border.all(
+          color: const Color(0xFFB9473E).withValues(alpha: 0.3),
+        ),
       ),
       child: Row(
         children: [
@@ -3564,7 +5079,9 @@ class _StatusChip extends StatelessWidget {
       ),
       child: Text(
         label,
-        style: Theme.of(context).textTheme.labelLarge?.copyWith(color: Colors.white),
+        style: Theme.of(
+          context,
+        ).textTheme.labelLarge?.copyWith(color: Colors.white),
       ),
     );
   }
@@ -3731,18 +5248,26 @@ class _VoiceAssistantSheetState extends State<_VoiceAssistantSheet>
             children: [
               Row(
                 children: [
-                  const Icon(Icons.assistant, color: Color(0xFF7EC8E3), size: 22),
+                  const Icon(
+                    Icons.assistant,
+                    color: Color(0xFF7EC8E3),
+                    size: 22,
+                  ),
                   const SizedBox(width: 8),
                   Text(
                     'Copilot Voice Assistant',
                     style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w600,
-                        ),
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                   const Spacer(),
                   IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white54, size: 20),
+                    icon: const Icon(
+                      Icons.close,
+                      color: Colors.white54,
+                      size: 20,
+                    ),
                     onPressed: () => Navigator.of(context).pop(),
                     padding: EdgeInsets.zero,
                     constraints: const BoxConstraints(),
@@ -3752,21 +5277,22 @@ class _VoiceAssistantSheetState extends State<_VoiceAssistantSheet>
               const SizedBox(height: 8),
               Text(
                 'Tap the mic and say a command — approve note, run safety review, navigate to agents, and more.',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.white54),
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: Colors.white54),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 28),
               // Mic button
               GestureDetector(
-                onTap: _processing ? null : (_listening ? _stopAndProcess : _startListening),
+                onTap: _processing
+                    ? null
+                    : (_listening ? _stopAndProcess : _startListening),
                 child: AnimatedBuilder(
                   animation: _pulseAnim,
                   builder: (_, child) {
                     final scale = _listening ? _pulseAnim.value : 1.0;
-                    return Transform.scale(
-                      scale: scale,
-                      child: child,
-                    );
+                    return Transform.scale(scale: scale, child: child);
                   },
                   child: Container(
                     width: 80,
@@ -3776,20 +5302,24 @@ class _VoiceAssistantSheetState extends State<_VoiceAssistantSheet>
                       color: _listening
                           ? const Color(0xFFE53935)
                           : _processing
-                              ? Colors.grey.shade700
-                              : const Color(0xFF4A6D8C),
+                          ? Colors.grey.shade700
+                          : const Color(0xFF4A6D8C),
                       boxShadow: _listening
                           ? [
                               BoxShadow(
-                                color: const Color(0xFFE53935).withValues(alpha: 0.5),
+                                color: const Color(
+                                  0xFFE53935,
+                                ).withValues(alpha: 0.5),
                                 blurRadius: 24,
                                 spreadRadius: 4,
-                              )
+                              ),
                             ]
                           : [],
                     ),
                     child: Icon(
-                      _listening ? Icons.stop : (_processing ? Icons.hourglass_top : Icons.mic),
+                      _listening
+                          ? Icons.stop
+                          : (_processing ? Icons.hourglass_top : Icons.mic),
                       color: Colors.white,
                       size: 36,
                     ),
@@ -3802,9 +5332,9 @@ class _VoiceAssistantSheetState extends State<_VoiceAssistantSheet>
                 Text(
                   _transcript.isEmpty ? 'Listening…' : '"$_transcript"',
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: Colors.white70,
-                        fontStyle: FontStyle.italic,
-                      ),
+                    color: Colors.white70,
+                    fontStyle: FontStyle.italic,
+                  ),
                   textAlign: TextAlign.center,
                 )
               else if (_processing)
@@ -3818,10 +5348,7 @@ class _VoiceAssistantSheetState extends State<_VoiceAssistantSheet>
               else if (_result != null)
                 _ResponseCard(result: _result!, onAction: widget.onActionCode)
               else
-                const Text(
-                  'Ready',
-                  style: TextStyle(color: Colors.white38),
-                ),
+                const Text('Ready', style: TextStyle(color: Colors.white38)),
             ],
           ),
         ),
@@ -3883,7 +5410,11 @@ class _ResponseCard extends StatelessWidget {
                 ),
                 child: Text(
                   intentLabel,
-                  style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
             ],
@@ -3902,7 +5433,9 @@ class _ResponseCard extends StatelessWidget {
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFF4A6D8C),
                   foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
                 ),
                 child: Text(actionLabel),
               ),

@@ -10,6 +10,13 @@ from litellm import completion
 
 from clinic_copilot.config import settings
 from clinic_copilot.prompts import (
+    build_critic_review_prompt,
+    build_diagnosis_confidence_prompt,
+    build_patient_friendly_summary_prompt,
+    build_patient_timeline_summary_prompt,
+    build_prescription_generator_prompt,
+    build_rag_medical_validation_prompt,
+    build_full_output_validation_prompt,
     build_diagnosis_prompt,
     build_entity_extraction_prompt,
     build_soap_prompt,
@@ -54,15 +61,14 @@ class LLMClient:
         soap_draft = SoapDraftOutput.model_validate(soap_payload)
 
         diagnosis_payload = self._call_json(build_diagnosis_prompt(entities), priority="Clinical_Reasoning")
-        diagnosis_items = diagnosis_payload.get("conditions", [])
+        diagnosis_items = self._normalize_diagnosis_items(diagnosis_payload)
         differential = [
             DifferentialDiagnosisItem(
-                condition=item.get("condition", "unknown"),
-                rationale=item.get("reason", "unknown"),
-                confidence=item.get("confidence", "low"),
+                condition=item["condition"],
+                rationale=item["reason"],
+                confidence=item["confidence"],
             )
-            for item in diagnosis_items[:3]
-            if item.get("condition")
+            for item in diagnosis_items
         ]
 
         treatment_payload = self._call_json(
@@ -134,6 +140,7 @@ class LLMClient:
                 tests=[],
                 advice=["Doctor validation required"],
                 follow_up="unknown",
+                warning="Doctor validation required",
             ),
         )
         return ClinicalNoteResponse(
@@ -231,15 +238,83 @@ class LLMClient:
                 if isinstance(value, str) and value.strip()
             ]
 
+        history_values = [
+            value
+            for value in payload.get("history", [])
+            if isinstance(value, str) and value.strip()
+        ]
+        medical_history_values = [
+            value
+            for value in payload.get("medical_history", [])
+            if isinstance(value, str) and value.strip()
+        ]
+        lifestyle_values = [
+            value
+            for value in payload.get("lifestyle", [])
+            if isinstance(value, str) and value.strip()
+        ]
+        merged_history = []
+        seen: set[str] = set()
+        for value in [*history_values, *medical_history_values, *lifestyle_values]:
+            normalized = value.strip()
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged_history.append(normalized)
+
         return ClinicalEntities(
             symptoms=facts("symptoms"),
             duration=facts("duration"),
             severity=facts("severity"),
-            medical_history=facts("history"),
+            medical_history=[
+                ExtractedFact(value=value, status="supported", confidence="medium")
+                for value in merged_history
+            ],
             medications=facts("medications"),
             allergies=facts("allergies"),
             vitals=facts("vitals"),
         )
+
+    def _normalize_diagnosis_items(self, payload: Any) -> list[dict[str, str]]:
+        # Accept either the new array format or legacy {"conditions": [...]} format.
+        raw_items: list[Any]
+        if isinstance(payload, list):
+            raw_items = payload
+        elif isinstance(payload, dict):
+            maybe_items = payload.get("conditions", [])
+            raw_items = maybe_items if isinstance(maybe_items, list) else []
+        else:
+            raw_items = []
+
+        normalized: list[dict[str, str]] = []
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                continue
+            condition = str(raw.get("condition", "")).strip()
+            reason = str(raw.get("reason", "")).strip()
+            confidence = str(raw.get("confidence", "low")).strip().lower()
+            if not condition or not reason:
+                continue
+            if confidence not in {"low", "medium", "high"}:
+                confidence = "low"
+
+            # Conservative guardrail: demote overconfident wording in uncertain drafts.
+            lowered_reason = reason.lower()
+            if any(token in lowered_reason for token in ("definite", "certain", "confirmed", "diagnosed")):
+                confidence = "low"
+
+            normalized.append(
+                {
+                    "condition": condition,
+                    "reason": reason,
+                    "confidence": confidence,
+                }
+            )
+            if len(normalized) >= 3:
+                break
+
+        return normalized
 
     def _build_summary(self, entities: ClinicalEntities, transcript: str) -> str:
         parts: list[str] = []
@@ -319,6 +394,8 @@ class LLMClient:
             sections.append("Advice: " + ", ".join(treatment.advice))
         if treatment.follow_up:
             sections.append("Follow-up: " + treatment.follow_up)
+        if treatment.warning:
+            sections.append("Warning: " + treatment.warning)
         return " ".join(sections) if sections else "unknown"
 
     def analyze_visual_objective(self, media_path: str, media_type: str) -> dict[str, Any]:
@@ -412,6 +489,242 @@ class LLMClient:
             }
         except Exception:
             return _fallback_patient_after_visit_summary(soap_note)
+
+    def summarize_patient_timeline(self, past_records: Any) -> dict[str, Any]:
+        if not self._gateway_enabled:
+            return {
+                "chronic_conditions": [],
+                "recurring_symptoms": [],
+                "medication_history": [],
+                "trend_summary": "Insufficient model backend to summarize timeline.",
+            }
+
+        try:
+            payload = self._call_json(build_patient_timeline_summary_prompt(past_records), priority="Clinical_Reasoning")
+        except Exception:
+            return {
+                "chronic_conditions": [],
+                "recurring_symptoms": [],
+                "medication_history": [],
+                "trend_summary": "Unable to summarize timeline from current records.",
+            }
+
+        def list_field(key: str) -> list[str]:
+            raw = payload.get(key, []) if isinstance(payload, dict) else []
+            if not isinstance(raw, list):
+                return []
+            return [str(item).strip() for item in raw if str(item).strip()]
+
+        trend_summary = ""
+        if isinstance(payload, dict):
+            trend_summary = str(payload.get("trend_summary", "")).strip()
+
+        return {
+            "chronic_conditions": list_field("chronic_conditions"),
+            "recurring_symptoms": list_field("recurring_symptoms"),
+            "medication_history": list_field("medication_history"),
+            "trend_summary": trend_summary,
+        }
+
+    def rag_validate_diagnosis(self, diagnosis: Any, context: Any) -> dict[str, Any]:
+        if not self._gateway_enabled:
+            return {
+                "supported": False,
+                "evidence": "",
+                "confidence": "low",
+            }
+
+        try:
+            payload = self._call_json(
+                build_rag_medical_validation_prompt(diagnosis=diagnosis, context=context),
+                priority="Clinical_Reasoning",
+            )
+        except Exception:
+            return {
+                "supported": False,
+                "evidence": "",
+                "confidence": "low",
+            }
+
+        supported = bool(payload.get("supported", False)) if isinstance(payload, dict) else False
+        evidence = str(payload.get("evidence", "")).strip() if isinstance(payload, dict) else ""
+        confidence = str(payload.get("confidence", "low")).strip().lower() if isinstance(payload, dict) else "low"
+        if confidence not in {"low", "medium", "high"}:
+            confidence = "low"
+
+        # Hard rule: if no evidence, force unsupported.
+        if not evidence:
+            supported = False
+
+        return {
+            "supported": supported,
+            "evidence": evidence,
+            "confidence": confidence,
+        }
+
+    def validate_full_clinical_output(self, full_output: Any) -> dict[str, Any]:
+        if not self._gateway_enabled:
+            return {
+                "valid": False,
+                "issues": ["Model backend unavailable for validation."],
+                "severity": "medium",
+            }
+
+        try:
+            payload = self._call_json(
+                build_full_output_validation_prompt(full_output),
+                priority="Clinical_Reasoning",
+            )
+        except Exception:
+            return {
+                "valid": False,
+                "issues": ["Unable to validate full clinical output."],
+                "severity": "medium",
+            }
+
+        valid = bool(payload.get("valid", False)) if isinstance(payload, dict) else False
+        issues_raw = payload.get("issues", []) if isinstance(payload, dict) else []
+        issues = [str(item).strip() for item in issues_raw if str(item).strip()] if isinstance(issues_raw, list) else []
+        severity = str(payload.get("severity", "low")).strip().lower() if isinstance(payload, dict) else "low"
+        if severity not in {"low", "medium", "high"}:
+            severity = "medium"
+        if not valid and not issues:
+            issues = ["Validation flagged concerns requiring clinician review."]
+
+        return {
+            "valid": valid,
+            "issues": issues,
+            "severity": severity,
+        }
+
+    def critic_review_output(self, output: Any) -> dict[str, Any]:
+        if not self._gateway_enabled:
+            return {
+                "errors": ["Model backend unavailable for critic review."],
+                "improvements": [],
+                "final_verdict": "needs_revision",
+            }
+
+        try:
+            payload = self._call_json(
+                build_critic_review_prompt(output),
+                priority="Clinical_Reasoning",
+            )
+        except Exception:
+            return {
+                "errors": ["Unable to run critic review on current output."],
+                "improvements": [],
+                "final_verdict": "needs_revision",
+            }
+
+        errors_raw = payload.get("errors", []) if isinstance(payload, dict) else []
+        improvements_raw = payload.get("improvements", []) if isinstance(payload, dict) else []
+        verdict = str(payload.get("final_verdict", "needs_revision")).strip().lower() if isinstance(payload, dict) else "needs_revision"
+        if verdict not in {"acceptable", "needs_revision"}:
+            verdict = "needs_revision"
+
+        return {
+            "errors": [str(item).strip() for item in errors_raw if str(item).strip()] if isinstance(errors_raw, list) else [],
+            "improvements": [str(item).strip() for item in improvements_raw if str(item).strip()]
+            if isinstance(improvements_raw, list)
+            else [],
+            "final_verdict": verdict,
+        }
+
+    def score_diagnosis_confidence(self, diagnosis: Any) -> dict[str, Any]:
+        if not self._gateway_enabled:
+            return {
+                "score": 25,
+                "reason": "Model backend unavailable; default conservative confidence score used.",
+            }
+
+        try:
+            payload = self._call_json(
+                build_diagnosis_confidence_prompt(diagnosis),
+                priority="Clinical_Reasoning",
+            )
+        except Exception:
+            return {
+                "score": 25,
+                "reason": "Unable to score diagnosis confidence from current input.",
+            }
+
+        raw_score = payload.get("score", 0) if isinstance(payload, dict) else 0
+        try:
+            score = int(raw_score)
+        except Exception:
+            score = 0
+        score = max(0, min(100, score))
+        reason = str(payload.get("reason", "")).strip() if isinstance(payload, dict) else ""
+        if not reason:
+            reason = "Confidence based on available diagnostic evidence only."
+
+        return {
+            "score": score,
+            "reason": reason,
+        }
+
+    def generate_patient_friendly_summary(self, soap_note: Any) -> dict[str, Any]:
+        if not self._gateway_enabled:
+            return {
+                "summary": "Your doctor reviewed your symptoms, exam findings, and treatment plan. Please follow the care plan and contact your clinic if symptoms worsen.",
+            }
+
+        try:
+            payload = self._call_json(
+                build_patient_friendly_summary_prompt(soap_note),
+                priority="Standard",
+            )
+        except Exception:
+            return {
+                "summary": "Your doctor reviewed your symptoms, exam findings, and treatment plan. Please follow the care plan and contact your clinic if symptoms worsen.",
+            }
+
+        summary = str(payload.get("summary", "")).strip() if isinstance(payload, dict) else ""
+        if not summary:
+            summary = "Your doctor reviewed your symptoms, exam findings, and treatment plan. Please follow the care plan and contact your clinic if symptoms worsen."
+
+        # Enforce max 150 words.
+        words = summary.split()
+        if len(words) > 150:
+            summary = " ".join(words[:150]).strip()
+
+        return {"summary": summary}
+
+    def generate_prescription_draft(self, treatment: Any) -> dict[str, Any]:
+        if not self._gateway_enabled:
+            return {
+                "medications": [],
+                "dosage": [],
+                "instructions": [],
+                "notes": "Doctor must verify",
+            }
+
+        try:
+            payload = self._call_json(
+                build_prescription_generator_prompt(treatment),
+                priority="Clinical_Reasoning",
+            )
+        except Exception:
+            return {
+                "medications": [],
+                "dosage": [],
+                "instructions": [],
+                "notes": "Doctor must verify",
+            }
+
+        def normalize_list(key: str) -> list[str]:
+            raw = payload.get(key, []) if isinstance(payload, dict) else []
+            if not isinstance(raw, list):
+                return []
+            return [str(item).strip() for item in raw if str(item).strip()]
+
+        return {
+            "medications": normalize_list("medications"),
+            "dosage": normalize_list("dosage"),
+            "instructions": normalize_list("instructions"),
+            "notes": "Doctor must verify",
+        }
 
 
 def _infer_media_mime(path: Path, media_type: str) -> str:

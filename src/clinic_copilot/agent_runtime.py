@@ -1013,7 +1013,7 @@ class BillingOptimizerAgent:
 
 
 class ObserverAgent:
-    """Real-time observer agent that nudges clinicians about missed critical follow-up questions."""
+    """Real-time clinical assistant that extracts concise actionable guidance from partial conversations."""
 
     def __init__(self) -> None:
         self._model = settings.llm_standard_model or settings.openai_model or settings.ollama_model
@@ -1031,30 +1031,78 @@ class ObserverAgent:
         if elapsed_seconds < self._minimum_elapsed_seconds(normalized_sensitivity):
             return None
 
-        lowered = transcript.lower()
-        if not self._mentions_chest_pain(lowered, sensitivity=normalized_sensitivity):
-            return None
-        if self._doctor_asked_follow_up(lowered, sensitivity=normalized_sensitivity):
+        extracted = self._llm_extract_clinical_snapshot(transcript, normalized_sensitivity)
+        if extracted is None:
+            extracted = self._rule_based_snapshot(transcript, normalized_sensitivity)
+
+        symptoms = [item for item in extracted.get("symptoms", []) if str(item).strip()][:4]
+        risks = self._normalize_risks(extracted.get("risks", []))
+        if not risks:
+            risk_signals_fallback = [item for item in extracted.get("risk_signals", []) if str(item).strip()][:4]
+            risks = [
+                {
+                    "risk": item,
+                    "severity": "medium",
+                    "reason": "Potential concern based on partial conversation.",
+                }
+                for item in risk_signals_fallback
+            ]
+        risk_signals = [item.get("risk", "") for item in risks if str(item.get("risk", "")).strip()][:4]
+        missing_questions = [item for item in extracted.get("suggested_questions", []) if str(item).strip()][:5]
+        if not missing_questions:
+            missing_questions = [item for item in extracted.get("missing_questions", []) if str(item).strip()][:5]
+        assumptions = [item for item in extracted.get("assumptions", []) if str(item).strip()][:4]
+        uncertainty = str(extracted.get("uncertainty", "")).strip() or "unknown"
+        next_question_suggestions = self._build_next_question_suggestions(
+            missing_questions=missing_questions,
+            risk_signals=risk_signals,
+            symptoms=symptoms,
+        )
+        if not symptoms and not risk_signals and not missing_questions:
             return None
 
-        llm_confirmed = self._llm_confirm_nudge(transcript)
-        if llm_confirmed is False:
-            return None
+        symptoms_out = self._unknown_if_empty(symptoms)
+        risk_signals_out = self._unknown_if_empty(risk_signals)
+        missing_questions_out = self._unknown_if_empty(missing_questions)
+        assumptions_out = self._unknown_if_empty(assumptions)
 
         evidence = self._find_evidence_sentence(transcript)
+        severity = "critical" if risk_signals else "warning"
+        toast_color = "red" if severity == "critical" else "orange"
+        message = self._compact_message(symptoms, risk_signals, missing_questions)
+
         return {
-            "id": f"nudge-{abs(hash((evidence, elapsed_seconds))) % 10_000_000}",
-            "severity": "critical",
-            "title": "Clinical Nudge",
-            "message": "Patient reported chest pain. Ask about shortness of breath and left arm pain.",
+            "id": f"nudge-{abs(hash((evidence, elapsed_seconds, message))) % 10_000_000}",
+            "severity": severity,
+            "title": "Clinical Assistant",
+            "message": message,
             "evidence": evidence,
-            "recommended_questions": [
-                "Are you short of breath right now?",
-                "Does the pain radiate to your left arm?",
-            ],
-            "trigger": "missed_chest_pain_follow_up",
+            "symptoms": symptoms_out,
+            "risks": risks if risks else [{"risk": "unknown", "severity": "low", "reason": "unknown"}],
+            "suggested_questions": next_question_suggestions if next_question_suggestions else ["unknown"],
+            "risk_signals": risk_signals_out,
+            "missing_questions": missing_questions_out,
+            "next_question_suggestions": next_question_suggestions,
+            "recommended_questions": next_question_suggestions if next_question_suggestions else ["unknown"],
+            "risk_detection_engine": risks if risks else [{"risk": "unknown", "severity": "low", "reason": "unknown"}],
+            "doctor_suggestion_engine": next_question_suggestions if next_question_suggestions else ["unknown"],
+            "facts": {
+                "symptoms": symptoms_out,
+                "risks": risks if risks else [{"risk": "unknown", "severity": "low", "reason": "unknown"}],
+                "suggested_questions": next_question_suggestions if next_question_suggestions else ["unknown"],
+            },
+            "assumptions": assumptions_out,
+            "uncertainty": uncertainty,
+            "doctor_validation_required": True,
+            "safety": {
+                "definitive_diagnosis_provided": False,
+                "high_risk_treatment_suggested": False,
+                "doctor_validation_required": True,
+            },
+            "clinical_assistant_tasks": extracted.get("clinical_assistant_tasks", []),
+            "trigger": extracted.get("trigger", "clinical_snapshot"),
             "elapsed_seconds": elapsed_seconds,
-            "toast_color": "red",
+            "toast_color": toast_color,
             "sensitivity": normalized_sensitivity,
         }
 
@@ -1065,32 +1113,8 @@ class ObserverAgent:
             return 240
         return 120
 
-    def _mentions_chest_pain(self, lowered_transcript: str, sensitivity: str) -> bool:
-        if sensitivity == "high":
-            patterns = ("chest pain", "chest tightness", "chest pressure", "chest discomfort")
-        else:
-            patterns = ("chest pain", "chest tightness", "chest pressure")
-        return any(pattern in lowered_transcript for pattern in patterns)
-
-    def _doctor_asked_follow_up(self, lowered_transcript: str, sensitivity: str) -> bool:
-        doctor_lines = []
-        for line in lowered_transcript.splitlines():
-            cleaned = line.strip()
-            if cleaned.startswith("doctor:"):
-                doctor_lines.append(cleaned)
-        doctor_text = " ".join(doctor_lines) if doctor_lines else lowered_transcript
-
-        breathing_terms = ("shortness of breath", "breathless", "difficulty breathing")
-        arm_terms = ("left arm pain", "pain in your arm", "radiate to your arm")
-        asked_breathing = any(term in doctor_text for term in breathing_terms)
-        asked_arm = any(term in doctor_text for term in arm_terms)
-
-        if sensitivity == "high":
-            return asked_breathing and asked_arm
-        return asked_breathing or asked_arm
-
-    def _llm_confirm_nudge(self, transcript: str) -> bool | None:
-        # Fast local LLM confirmation layer; falls back to deterministic rule if unavailable.
+    def _llm_extract_clinical_snapshot(self, transcript: str, sensitivity: str) -> dict[str, Any] | None:
+        # Fast local LLM extraction layer; falls back to deterministic rules if unavailable.
         try:
             response = completion(
                 model=self._model,
@@ -1102,9 +1126,17 @@ class ObserverAgent:
                     {
                         "role": "system",
                         "content": (
-                            "You are an encounter observer. Return JSON only: "
-                            '{"nudge": true|false}. True only when patient mentions chest pain and '
-                            "doctor has not yet asked about shortness of breath or left arm pain."
+                            "You are a real-time clinical assistant. "
+                            "Analyze partial doctor-patient conversation and return valid JSON only in this exact shape: "
+                            '{"symptoms":[],"risks":[{"risk":"","severity":"low|medium|high","reason":""}],"suggested_questions":[]}. '
+                            "Rules: use ONLY information present in transcript; NEVER invent facts; if unsure use 'unknown'; "
+                            "For risks: highlight urgent risks when explicitly supported, and do not exaggerate. "
+                            "For suggested_questions: each item must start with Ask about, Check, or Clarify. "
+                            "separate facts from assumptions; be conservative with diagnosis and treatment; "
+                            "do not provide definitive diagnosis; do not suggest high-risk treatments; "
+                            "always assume doctor validation required; keep each item short; "
+                            "focus only on currently available information. "
+                            f"Sensitivity is {sensitivity}. For high sensitivity, include borderline risks."
                         ),
                     },
                     {"role": "user", "content": transcript[-5000:]},
@@ -1112,9 +1144,181 @@ class ObserverAgent:
             )
             raw = str(response.choices[0].message.content or "{}").strip()
             parsed = json.loads(raw)
-            return bool(parsed.get("nudge", False))
+            symptoms = parsed.get("symptoms", [])
+            risks = self._normalize_risks(parsed.get("risks", []))
+            suggested_questions = parsed.get("suggested_questions", [])
+            if not isinstance(symptoms, list) or not isinstance(suggested_questions, list):
+                return None
+            risk_signals = [item.get("risk", "") for item in risks if str(item.get("risk", "")).strip()]
+            normalized_questions = self._build_next_question_suggestions(
+                missing_questions=[str(item).strip() for item in suggested_questions if str(item).strip()],
+                risk_signals=risk_signals,
+                symptoms=[str(item).strip() for item in symptoms if str(item).strip()],
+            )
+            return {
+                "symptoms": [str(item).strip() for item in symptoms if str(item).strip()],
+                "risks": risks,
+                "risk_signals": risk_signals,
+                "suggested_questions": normalized_questions,
+                "missing_questions": [str(item).strip() for item in suggested_questions if str(item).strip()],
+                "assumptions": ["unknown"],
+                "uncertainty": "Partial conversation; findings may be incomplete.",
+                "clinical_assistant_tasks": [
+                    "Immediate safety triage for red flags",
+                    "Targeted focused exam and vitals",
+                    "Document positives/negatives in SOAP",
+                ],
+                "trigger": str(parsed.get("trigger", "clinical_snapshot")),
+            }
         except Exception:
             return None
+
+    def _rule_based_snapshot(self, transcript: str, sensitivity: str) -> dict[str, Any]:
+        lowered = transcript.lower()
+        symptoms: list[str] = []
+        risk_signals: list[str] = []
+        missing_questions: list[str] = []
+
+        if any(term in lowered for term in ("chest pain", "chest tightness", "chest pressure")):
+            symptoms.append("Chest pain/tightness")
+            risk_signals.append("Chest pain red flag requires urgent clinician assessment")
+            if "shortness of breath" not in lowered and "breathless" not in lowered:
+                missing_questions.append("Any shortness of breath now?")
+            if "left arm" not in lowered and "radiat" not in lowered:
+                missing_questions.append("Does pain radiate to left arm/jaw/back?")
+
+        if "fever" in lowered:
+            symptoms.append("Fever")
+            if "temperature" not in lowered:
+                missing_questions.append("Max temperature and duration of fever?")
+
+        if any(term in lowered for term in ("dizzy", "dizziness", "syncope", "faint")):
+            symptoms.append("Dizziness/faintness")
+            if "fall" not in lowered:
+                missing_questions.append("Any syncope/fall or near-faint episode?")
+
+        if any(term in lowered for term in ("pregnan", "pregnancy")):
+            risk_signals.append("Pregnancy-related safety considerations")
+
+        if any(term in lowered for term in ("warfarin", "digoxin", "lithium", "insulin", "clozapine", "amiodarone")):
+            risk_signals.append("High-risk medication mentioned")
+            missing_questions.append("Any recent dose change/adverse effects/interactions?")
+
+        tasks: list[str] = []
+        if risk_signals:
+            tasks.append("Immediate safety triage for red flags")
+        if symptoms:
+            tasks.append("Targeted focused exam and vitals")
+        if symptoms:
+            tasks.append("Clarify onset, duration, severity, and progression")
+        tasks.append("Document positives/negatives in SOAP")
+        tasks.append("Define follow-up and return precautions")
+
+        # Keep output short/actionable.
+        risks: list[dict[str, str]] = []
+        for signal in risk_signals[:4]:
+            severity = "high" if "red flag" in signal.lower() else "medium"
+            risks.append(
+                {
+                    "risk": signal,
+                    "severity": severity,
+                    "reason": "Based on terms explicitly mentioned in the partial conversation.",
+                }
+            )
+
+        normalized_questions = self._build_next_question_suggestions(
+            missing_questions=missing_questions[:5],
+            risk_signals=risk_signals[:4],
+            symptoms=symptoms[:4],
+        )
+
+        return {
+            "symptoms": symptoms[:4],
+            "risks": risks,
+            "risk_signals": risk_signals[:4],
+            "suggested_questions": normalized_questions,
+            "missing_questions": missing_questions[:5],
+            "assumptions": ["unknown"],
+            "uncertainty": "Partial conversation; findings may be incomplete.",
+            "clinical_assistant_tasks": tasks[:5],
+            "trigger": "rule_based_clinical_snapshot_high" if sensitivity == "high" else "rule_based_clinical_snapshot",
+        }
+
+    def _compact_message(self, symptoms: list[str], risk_signals: list[str], missing_questions: list[str]) -> str:
+        parts: list[str] = []
+        if symptoms:
+            parts.append(f"Symptoms: {', '.join(symptoms[:3])}")
+        if risk_signals:
+            parts.append(f"Risks: {', '.join(risk_signals[:2])}")
+        if missing_questions:
+            parts.append(f"Ask now: {missing_questions[0]}")
+        return "; ".join(parts)[:280]
+
+    def _build_next_question_suggestions(
+        self,
+        *,
+        missing_questions: list[str],
+        risk_signals: list[str],
+        symptoms: list[str],
+    ) -> list[str]:
+        suggestions: list[str] = []
+
+        for question in missing_questions:
+            normalized = str(question).strip().rstrip("?.!")
+            if not normalized:
+                continue
+            if normalized.lower().startswith("ask about "):
+                suggestions.append(normalized)
+            else:
+                suggestions.append(f"Ask about {normalized}")
+            if len(suggestions) >= 2:
+                break
+
+        for risk in risk_signals:
+            if len(suggestions) >= 3:
+                break
+            normalized = str(risk).strip().rstrip("?.!")
+            if not normalized:
+                continue
+            suggestions.append(f"Check {normalized}")
+
+        if len(suggestions) < 3 and symptoms:
+            normalized = str(symptoms[0]).strip().rstrip("?.!")
+            if normalized:
+                suggestions.append(f"Clarify onset and progression of {normalized}")
+
+        # De-duplicate while preserving order and keep output short.
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in suggestions:
+            key = item.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+
+        return deduped[:3]
+
+    def _unknown_if_empty(self, items: list[str]) -> list[str]:
+        cleaned = [str(item).strip() for item in items if str(item).strip()]
+        return cleaned if cleaned else ["unknown"]
+
+    def _normalize_risks(self, risks: Any) -> list[dict[str, str]]:
+        if not isinstance(risks, list):
+            return []
+        normalized: list[dict[str, str]] = []
+        for item in risks:
+            if not isinstance(item, dict):
+                continue
+            risk = str(item.get("risk", "")).strip()
+            reason = str(item.get("reason", "")).strip() or "unknown"
+            severity = str(item.get("severity", "")).strip().lower()
+            if severity not in {"low", "medium", "high"}:
+                severity = "medium"
+            if not risk:
+                continue
+            normalized.append({"risk": risk, "severity": severity, "reason": reason})
+        return normalized[:4]
 
     def _find_evidence_sentence(self, transcript: str) -> str:
         for sentence in _split_text_into_sentences(transcript):
@@ -1407,6 +1611,37 @@ class AgentRuntime:
         )
         return result
 
+    def run_scribe(self, request: AgentRunRequest) -> dict[str, Any]:
+        case = self._resolve_case(request)
+        run_id = uuid4().hex[:12]
+        self._audit_store.log_event(
+            run_id,
+            case.case_id,
+            self._scribe_agent.id,
+            self._scribe_agent.name,
+            "agent_started",
+            {"step": "scribe"},
+        )
+        intake_output = {"draft_note": case.note.model_dump()}
+        result = self._scribe_agent.run(case.transcript, intake_output)
+        self._audit_store.log_event(
+            run_id,
+            case.case_id,
+            self._scribe_agent.id,
+            self._scribe_agent.name,
+            "agent_completed",
+            {
+                "step": "scribe",
+                "safety_tool_invoked": result.get("safety_tool_invoked", False),
+                "review_flags_count": len(result.get("review_flags", [])),
+            },
+        )
+        return {
+            "case_id": case.case_id,
+            "patient_label": case.patient_label,
+            **result,
+        }
+
     def list_audit_events(
         self,
         *,
@@ -1475,6 +1710,12 @@ class ProjectAgentRunner:
                 agent_id=agent_id,
                 agent_name=metadata["name"],
                 result=self._runtime.run_patient_communicator(request),
+            )
+        if agent_id == "scribe_agent":
+            return AgentRunResponse(
+                agent_id=agent_id,
+                agent_name=metadata["name"],
+                result=self._runtime.run_scribe(request),
             )
 
         raise KeyError(agent_id)

@@ -987,6 +987,27 @@ class ClinicalDocumentationService:
             top_k=max(1, int(top_k)),
         )
 
+    def summarize_patient_timeline(self, past_records: Any) -> dict[str, Any]:
+        return self._llm_client.summarize_patient_timeline(past_records)
+
+    def rag_validate_diagnosis(self, diagnosis: Any, context: Any) -> dict[str, Any]:
+        return self._llm_client.rag_validate_diagnosis(diagnosis=diagnosis, context=context)
+
+    def validate_full_clinical_output(self, full_output: Any) -> dict[str, Any]:
+        return self._llm_client.validate_full_clinical_output(full_output)
+
+    def critic_review_output(self, output: Any) -> dict[str, Any]:
+        return self._llm_client.critic_review_output(output)
+
+    def score_diagnosis_confidence(self, diagnosis: Any) -> dict[str, Any]:
+        return self._llm_client.score_diagnosis_confidence(diagnosis)
+
+    def generate_patient_friendly_summary(self, soap_note: Any) -> dict[str, Any]:
+        return self._llm_client.generate_patient_friendly_summary(soap_note)
+
+    def generate_prescription_draft(self, treatment: Any) -> dict[str, Any]:
+        return self._llm_client.generate_prescription_draft(treatment)
+
     def _generate_note_response(self, request: ClinicalNoteRequest) -> ClinicalNoteResponse:
         if self._haystack_pipeline.available:
             try:

@@ -67,6 +67,76 @@ class PatientHistoryDebugResponse(BaseModel):
     retrieved: list[RetrievedHistoryItem] = Field(default_factory=list)
 
 
+class PatientTimelineSummaryRequest(BaseModel):
+    past_records: Any
+
+
+class PatientTimelineSummaryResponse(BaseModel):
+    chronic_conditions: list[str] = Field(default_factory=list)
+    recurring_symptoms: list[str] = Field(default_factory=list)
+    medication_history: list[str] = Field(default_factory=list)
+    trend_summary: str = ""
+
+
+class RagMedicalValidationRequest(BaseModel):
+    diagnosis: Any
+    context: Any
+
+
+class RagMedicalValidationResponse(BaseModel):
+    supported: bool = False
+    evidence: str = ""
+    confidence: str = "low"
+
+
+class FullOutputValidationRequest(BaseModel):
+    full_output: Any
+
+
+class FullOutputValidationResponse(BaseModel):
+    valid: bool = False
+    issues: list[str] = Field(default_factory=list)
+    severity: Literal["low", "medium", "high"] = "low"
+
+
+class CriticReviewRequest(BaseModel):
+    output: Any
+
+
+class CriticReviewResponse(BaseModel):
+    errors: list[str] = Field(default_factory=list)
+    improvements: list[str] = Field(default_factory=list)
+    final_verdict: Literal["acceptable", "needs_revision"] = "needs_revision"
+
+
+class DiagnosisConfidenceScoreRequest(BaseModel):
+    diagnosis: Any
+
+
+class DiagnosisConfidenceScoreResponse(BaseModel):
+    score: int = Field(default=0, ge=0, le=100)
+    reason: str = ""
+
+
+class PatientFriendlySummaryRequest(BaseModel):
+    soap_note: Any
+
+
+class PatientFriendlySummaryResponse(BaseModel):
+    summary: str = ""
+
+
+class PrescriptionDraftRequest(BaseModel):
+    treatment: Any
+
+
+class PrescriptionDraftResponse(BaseModel):
+    medications: list[str] = Field(default_factory=list)
+    dosage: list[str] = Field(default_factory=list)
+    instructions: list[str] = Field(default_factory=list)
+    notes: str = "Doctor must verify"
+
+
 class EvidenceItem(BaseModel):
     quote: str = Field(description="Exact supporting text from the transcript.")
     speaker: Literal["doctor", "patient", "unknown"] = "unknown"
@@ -113,6 +183,7 @@ class TreatmentPlanDraft(BaseModel):
     tests: list[str] = Field(default_factory=list)
     advice: list[str] = Field(default_factory=list)
     follow_up: str = "unknown"
+    warning: str = "Doctor validation required"
 
 
 class SoapAssessmentItem(BaseModel):

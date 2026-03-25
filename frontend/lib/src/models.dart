@@ -6,7 +6,10 @@ Map<String, dynamic> _asMap(Object? value) {
 
 List<Map<String, dynamic>> _asMapList(Object? value) {
   if (value is! List) return const [];
-  return value.whereType<Map>().map((item) => Map<String, dynamic>.from(item)).toList();
+  return value
+      .whereType<Map>()
+      .map((item) => Map<String, dynamic>.from(item))
+      .toList();
 }
 
 DateTime _parseDateTime(Object? value) {
@@ -74,9 +77,14 @@ class ClinicalNote {
       summary: json['summary']?.toString() ?? '',
       entities: ClinicalEntities.fromJson(_asMap(json['entities'])),
       soapNote: SoapNote.fromJson(_asMap(json['soap_note'])),
-      reviewFlags: _asMapList(json['review_flags']).map(ReviewFlag.fromJson).toList(),
-      differentialDiagnosis: _asMapList(json['differential_diagnosis']).map(DifferentialDiagnosisItem.fromJson).toList(),
-      disclaimer: json['disclaimer']?.toString() ?? 'Clinician review required.',
+      reviewFlags: _asMapList(
+        json['review_flags'],
+      ).map(ReviewFlag.fromJson).toList(),
+      differentialDiagnosis: _asMapList(
+        json['differential_diagnosis'],
+      ).map(DifferentialDiagnosisItem.fromJson).toList(),
+      disclaimer:
+          json['disclaimer']?.toString() ?? 'Clinician review required.',
     );
   }
 }
@@ -347,7 +355,10 @@ class PatientHistoryDebugResponse {
       currentComplaint: json['current_complaint'] as String? ?? '',
       historicalContext: json['historical_context'] as String? ?? '',
       retrieved: (json['retrieved'] as List<dynamic>? ?? const [])
-          .map((item) => RetrievedHistoryItem.fromJson(item as Map<String, dynamic>))
+          .map(
+            (item) =>
+                RetrievedHistoryItem.fromJson(item as Map<String, dynamic>),
+          )
           .toList(),
     );
   }
@@ -394,6 +405,23 @@ class ClinicalNudgeEvent {
   String get title => payload['title'] as String? ?? 'Clinical Nudge';
   String get message => payload['message'] as String? ?? '';
   String get evidence => payload['evidence'] as String? ?? '';
+  List<String> get symptoms => _readStringList('symptoms');
+  List<String> get riskSignals => _readStringList('risk_signals');
+  List<String> get missingQuestions => _readStringList('missing_questions');
+  List<String> get nextQuestionSuggestions =>
+      _readStringList('next_question_suggestions');
+  List<String> get clinicalAssistantTasks =>
+      _readStringList('clinical_assistant_tasks');
+
+  List<String> _readStringList(String key) {
+    final raw = payload[key];
+    if (raw is! List) return const [];
+    return raw
+        .whereType<Object>()
+        .map((item) => item.toString().trim())
+        .where((item) => item.isNotEmpty)
+        .toList();
+  }
 
   factory ClinicalNudgeEvent.fromJson(Map<String, dynamic> json) {
     return ClinicalNudgeEvent(
@@ -450,7 +478,11 @@ class PatientAfterVisitSummary {
     List<String> parseList(String key) {
       final dynamic raw = json[key];
       if (raw is! List) return const [];
-      return raw.whereType<Object>().map((item) => item.toString()).where((item) => item.trim().isNotEmpty).toList();
+      return raw
+          .whereType<Object>()
+          .map((item) => item.toString())
+          .where((item) => item.trim().isNotEmpty)
+          .toList();
     }
 
     return PatientAfterVisitSummary(
@@ -485,13 +517,11 @@ class OrchestratorDuringVisitResult {
       bufferLength: (json['buffer_length'] as num?)?.toInt() ?? 0,
       elapsedSeconds: (json['elapsed_seconds'] as num?)?.toInt() ?? 0,
       nudge: nudgePayload is Map<String, dynamic>
-          ? ClinicalNudgeEvent.fromJson(
-              {
-                'type': 'clinical_nudge',
-                'case_id': json['case_id'] as String? ?? '',
-                'payload': nudgePayload,
-              },
-            )
+          ? ClinicalNudgeEvent.fromJson({
+              'type': 'clinical_nudge',
+              'case_id': json['case_id'] as String? ?? '',
+              'payload': nudgePayload,
+            })
           : null,
     );
   }
@@ -514,7 +544,9 @@ class OrchestratorPostVisitResult {
     return OrchestratorPostVisitResult(
       caseId: json['case_id'] as String? ?? '',
       signAllowed: json['sign_allowed'] as bool? ?? false,
-      preSignValidation: Map<String, dynamic>.from(json['pre_sign_validation'] as Map? ?? const {}),
+      preSignValidation: Map<String, dynamic>.from(
+        json['pre_sign_validation'] as Map? ?? const {},
+      ),
       outputs: Map<String, dynamic>.from(json['outputs'] as Map? ?? const {}),
     );
   }
@@ -563,7 +595,10 @@ class OfflineReadinessStatus {
           .toList(),
       databaseMode: json['database_mode'] as String? ?? 'unknown',
       checks: (json['checks'] as List<dynamic>? ?? const [])
-          .map((item) => OfflineReadinessCheck.fromJson(item as Map<String, dynamic>))
+          .map(
+            (item) =>
+                OfflineReadinessCheck.fromJson(item as Map<String, dynamic>),
+          )
           .toList(),
       ready: json['ready'] as bool? ?? false,
     );
@@ -589,6 +624,182 @@ class VoiceCommandResponse {
       responseText: json['response_text'] as String? ?? '',
       actionCode: json['action_code'] as String? ?? 'none',
       data: _asMap(json['data']),
+    );
+  }
+}
+
+class PatientTimelineSummary {
+  const PatientTimelineSummary({
+    required this.chronicConditions,
+    required this.recurringSymptoms,
+    required this.medicationHistory,
+    required this.trendSummary,
+  });
+
+  final List<String> chronicConditions;
+  final List<String> recurringSymptoms;
+  final List<String> medicationHistory;
+  final String trendSummary;
+
+  factory PatientTimelineSummary.fromJson(Map<String, dynamic> json) {
+    List<String> parseList(String key) {
+      final raw = json[key];
+      if (raw is! List) return const [];
+      return raw
+          .whereType<Object>()
+          .map((item) => item.toString().trim())
+          .where((item) => item.isNotEmpty)
+          .toList();
+    }
+
+    return PatientTimelineSummary(
+      chronicConditions: parseList('chronic_conditions'),
+      recurringSymptoms: parseList('recurring_symptoms'),
+      medicationHistory: parseList('medication_history'),
+      trendSummary: json['trend_summary']?.toString() ?? '',
+    );
+  }
+}
+
+class RagMedicalValidationResult {
+  const RagMedicalValidationResult({
+    required this.supported,
+    required this.evidence,
+    required this.confidence,
+  });
+
+  final bool supported;
+  final String evidence;
+  final String confidence;
+
+  factory RagMedicalValidationResult.fromJson(Map<String, dynamic> json) {
+    return RagMedicalValidationResult(
+      supported: json['supported'] as bool? ?? false,
+      evidence: json['evidence']?.toString() ?? '',
+      confidence: json['confidence']?.toString() ?? 'low',
+    );
+  }
+}
+
+class FullOutputValidationResult {
+  const FullOutputValidationResult({
+    required this.valid,
+    required this.issues,
+    required this.severity,
+  });
+
+  final bool valid;
+  final List<String> issues;
+  final String severity;
+
+  factory FullOutputValidationResult.fromJson(Map<String, dynamic> json) {
+    final rawIssues = json['issues'];
+    return FullOutputValidationResult(
+      valid: json['valid'] as bool? ?? false,
+      issues: rawIssues is List
+          ? rawIssues
+                .whereType<Object>()
+                .map((item) => item.toString().trim())
+                .where((item) => item.isNotEmpty)
+                .toList()
+          : const [],
+      severity: json['severity']?.toString() ?? 'low',
+    );
+  }
+}
+
+class CriticReviewResult {
+  const CriticReviewResult({
+    required this.errors,
+    required this.improvements,
+    required this.finalVerdict,
+  });
+
+  final List<String> errors;
+  final List<String> improvements;
+  final String finalVerdict;
+
+  factory CriticReviewResult.fromJson(Map<String, dynamic> json) {
+    List<String> parseList(String key) {
+      final raw = json[key];
+      if (raw is! List) return const [];
+      return raw
+          .whereType<Object>()
+          .map((item) => item.toString().trim())
+          .where((item) => item.isNotEmpty)
+          .toList();
+    }
+
+    return CriticReviewResult(
+      errors: parseList('errors'),
+      improvements: parseList('improvements'),
+      finalVerdict: json['final_verdict']?.toString() ?? 'needs_revision',
+    );
+  }
+}
+
+class DiagnosisConfidenceScoreResult {
+  const DiagnosisConfidenceScoreResult({
+    required this.score,
+    required this.reason,
+  });
+
+  final int score;
+  final String reason;
+
+  factory DiagnosisConfidenceScoreResult.fromJson(Map<String, dynamic> json) {
+    final rawScore = json['score'];
+    final score = rawScore is int
+        ? rawScore
+        : int.tryParse(rawScore?.toString() ?? '') ?? 0;
+    return DiagnosisConfidenceScoreResult(
+      score: score.clamp(0, 100),
+      reason: json['reason']?.toString() ?? '',
+    );
+  }
+}
+
+class PatientFriendlySummaryResult {
+  const PatientFriendlySummaryResult({required this.summary});
+
+  final String summary;
+
+  factory PatientFriendlySummaryResult.fromJson(Map<String, dynamic> json) {
+    return PatientFriendlySummaryResult(
+      summary: json['summary']?.toString() ?? '',
+    );
+  }
+}
+
+class PrescriptionDraftResult {
+  const PrescriptionDraftResult({
+    required this.medications,
+    required this.dosage,
+    required this.instructions,
+    required this.notes,
+  });
+
+  final List<String> medications;
+  final List<String> dosage;
+  final List<String> instructions;
+  final String notes;
+
+  factory PrescriptionDraftResult.fromJson(Map<String, dynamic> json) {
+    List<String> parseList(String key) {
+      final raw = json[key];
+      if (raw is! List) return const [];
+      return raw
+          .whereType<Object>()
+          .map((item) => item.toString().trim())
+          .where((item) => item.isNotEmpty)
+          .toList();
+    }
+
+    return PrescriptionDraftResult(
+      medications: parseList('medications'),
+      dosage: parseList('dosage'),
+      instructions: parseList('instructions'),
+      notes: json['notes']?.toString() ?? 'Doctor must verify',
     );
   }
 }

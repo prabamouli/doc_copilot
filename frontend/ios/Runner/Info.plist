@@ -47,6 +47,8 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Record your voice to dictate clinical notes and use the voice assistant.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Transcribe voice commands to navigate and update clinical documentation.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Capture wound photos and gait videos for clinical objective analysis.</string>
 	<key>NSPhotoLibraryUsageDescription</key>

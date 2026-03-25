@@ -58,7 +58,7 @@
         "nullable_output_keys": [],
         "input_schema": {},
         "output_schema": {},
-        "system_prompt": "You are a clinical entity extraction specialist.\n\nFrom transcript_text, extract only transcript-supported facts.\nReturn structured entities covering:\n- symptoms\n- duration\n- severity\n- medical_history\n- medications\n- allergies\n- vitals\n\nUse set_output(\"entities_json\", \"<json>\") with a valid JSON object.\nIf a field is missing, use an empty array. Do not invent facts.",
+        "system_prompt": "You are a clinical entity extraction specialist.\n\nFrom transcript_text, extract only transcript-supported facts.\nReturn structured entities in JSON with these keys only:\n- symptoms\n- duration\n- severity\n- history\n- medications\n- allergies\n- vitals\n- lifestyle\n\nUse set_output(\"entities_json\", \"<json>\") with a valid JSON object.\nIf a field is not present, return an empty array for that key. Do not infer. Do not invent facts.",
         "tools": [],
         "model": null,
         "function": null,
